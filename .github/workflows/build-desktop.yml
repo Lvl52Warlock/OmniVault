@@ -1,0 +1,56 @@
+name: Build Windows desktop app and agent
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install desktop dependencies
+        run: npm ci
+
+      - name: Install agent dependencies
+        run: npm install --prefix agent --no-audit --no-fund
+
+      - name: Build Windows installer
+        run: npm run dist:win
+
+      - name: Build single-file agent
+        run: npm run build:agent
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: omnivault-windows
+          path: |
+            dist/OmniVault-Setup-*.exe
+            dist/OmniVault-Setup-*.exe.blockmap
+            agent-dist/OmniVaultAgent.exe
+            agent-dist/OmniVaultAgent.sha256
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/OmniVault-Setup-*.exe
+            agent-dist/OmniVaultAgent.exe
+            agent-dist/OmniVaultAgent.sha256
+          generate_release_notes: true

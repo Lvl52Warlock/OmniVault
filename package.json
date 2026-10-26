@@ -1,0 +1,81 @@
+{
+  "name": "omnivault-rcon-client",
+  "version": "1.2.3",
+  "description": "OmniVault desktop control room for Project Reclaimer servers.",
+  "main": "main.js",
+  "author": "OmniVault",
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "electron .",
+    "start:local": "electron . --local",
+    "server": "node main.js",
+    "public": "powershell -NoProfile -ExecutionPolicy Bypass -File ../start-public.ps1",
+    "stop-public": "powershell -NoProfile -ExecutionPolicy Bypass -File ../stop-public.ps1",
+    "build:agent": "node scripts/build-agent.js",
+    "dist:win": "electron-builder --win nsis",
+    "dist:dir": "electron-builder --dir"
+  },
+  "dependencies": {
+    "express": "^5.3.0",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@yao-pkg/pkg": "^6.24.0",
+    "electron": "^34.5.8",
+    "electron-builder": "^26.18.0"
+  },
+  "allowScripts": {
+    "electron@34.5.8": true,
+    "esbuild@0.28.2": true
+  },
+  "build": {
+    "appId": "com.omnivault.controlpanel",
+    "productName": "OmniVault",
+    "electronVersion": "34.5.8",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "rcon.js",
+      "zip.js",
+      "panel.js",
+      "panel.css",
+      "index.html",
+      "default-panel-url.txt",
+      "webpanel/**/*",
+      "agent/**/*",
+      "!agent/node_modules/**/*",
+      "!agent/agent-config.json",
+      "!agent/.agent-test-config.json",
+      "!agent/logs/**/*",
+      "!**/*.log",
+      "!users.json",
+      "!servers.json",
+      "!sessions.json",
+      "!audit.log",
+      "!panel-url.txt",
+      "!panel-runtime.json",
+      "!dist/**/*",
+      "!desktop-dist/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "artifactName": "OmniVault-Setup-${version}.${ext}"
+    }
+  }
+}

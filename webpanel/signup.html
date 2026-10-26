@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>OmniVault | Create account</title>
+  <link rel="stylesheet" href="/webpanel/webpanel.css">
+</head>
+<body>
+  <main style="max-width:440px; margin:80px auto; padding:24px;">
+    <span class="brand-mark" style="width:48px; height:48px; font-size:24px; display:grid; margin:0 auto 16px;">OV</span>
+    <p class="eyebrow" style="text-align:center; letter-spacing:.12em;">OMNIVAULT</p>
+    <h1 style="text-align:center; margin-top:8px;">Create account</h1>
+    <p class="muted" style="text-align:center; margin-top:8px;">Your servers and RCON actions are private to your account. After signing in, the control room walks you through connecting your first server.</p>
+
+    <form id="signup-form" class="stack-form" style="display:flex; flex-direction:column; gap:14px; margin-top:24px;">
+      <label class="field">Username
+        <input id="signup-username" name="username" required minlength="3" maxlength="32" autocomplete="username" placeholder="3-32 characters">
+      </label>
+      <label class="field">Password
+        <input id="signup-password" name="password" type="password" required minlength="8" maxlength="128" autocomplete="new-password" placeholder="At least 8 characters">
+      </label>
+      <label class="field">Confirm password
+        <input id="signup-confirm" name="confirm" type="password" required minlength="8" maxlength="128" autocomplete="new-password" placeholder="Repeat password">
+      </label>
+      <label id="invite-field" class="field" hidden>Invite code
+        <input id="signup-invite" name="inviteCode" maxlength="128" autocomplete="off" placeholder="Invite code">
+      </label>
+      <p id="signup-error" class="auth-error" role="alert" hidden></p>
+      <button id="signup-submit" class="button button-primary" type="submit">Create account</button>
+    </form>
+
+    <p style="text-align:center; margin-top:16px; font-size:12px;">
+      <span class="muted">Already have an account?</span>
+      <a class="button button-quiet" href="/webpanel/" style="font-size:12px;">Sign in</a>
+    </p>
+    <p style="text-align:center; margin-top:10px; font-size:12px;">
+      <a class="button button-quiet" href="/api/desktop/download" style="font-size:12px;">Download the desktop app</a>
+    </p>
+  </main>
+  <script src="/webpanel/signup.js"></script>
+</body>
+</html>
