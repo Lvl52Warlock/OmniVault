@@ -11,9 +11,11 @@ The same releases are served by the panel at `/api/desktop/download` and `/api/a
 
 ## Checksums
 
+GitHub release assets, built by the `v1.2.3` workflow:
+
 ```text
-OmniVault-Setup-1.2.3.exe  4b92ddbab69138dca963841923641c47e39ff25261f59042eadcf4c952c2d7fd
-OmniVaultAgent.exe         f739eaee2dd3c1361fbaad37f34246ee156ca2c4d4533a74ceb416ce13bcce1c
+OmniVault-Setup-1.2.3.exe  821b4aa2476995b790da83822f0f661f0d7daddee98e22d02389c85f60c16166
+OmniVaultAgent.exe         ae4802a00c65b4148e393d25012bdf169fade22a32b4809e106349010dbeba37
 ```
 
 ## Highlights
