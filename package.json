@@ -1,6 +1,6 @@
 {
   "name": "omnivault-rcon-client",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "description": "OmniVault desktop control room for Project Reclaimer servers.",
   "main": "main.js",
   "author": "OmniVault",
@@ -12,6 +12,10 @@
     "public": "powershell -NoProfile -ExecutionPolicy Bypass -File ../start-public.ps1",
     "stop-public": "powershell -NoProfile -ExecutionPolicy Bypass -File ../stop-public.ps1",
     "build:agent": "node scripts/build-agent.js",
+    "test:team": "node scripts/test-team-files.js",
+    "test:agent-sandbox": "node scripts/test-agent-sandbox.js",
+    "test:instances": "node scripts/test-instances.js",
+    "test:panel-instances": "node scripts/test-panel-instances.js",
     "dist:win": "electron-builder --win nsis --publish never",
     "dist:dir": "electron-builder --dir"
   },
@@ -38,6 +42,7 @@
     "files": [
       "main.js",
       "preload.js",
+      "desktop-updater.js",
       "rcon.js",
       "zip.js",
       "panel.js",

@@ -26,6 +26,49 @@ Install
    --rcon-host 127.0.0.1 if your RCON listens somewhere else on the LAN. Add
    --skip-rcon-test only if the game server is offline during installation.
 
+   To enable the panel's server files manager, add the content folder that
+   holds your maps and playlists:
+
+   .\OmniVaultAgent.exe --panel "https://panel.example.com" --pair "1A2B-3C4D" --rcon-port 49176 --files-dir "C:\ProjectReclaimer\Content"
+
+   The setup wizard also asks for this folder. The agent only reads and writes
+   files below that folder. Map, gametype, playlist, config, text, and archive
+   extensions are allowed by default; executable and script extensions are
+   blocked. The server owner can delete files. A Developer team member can add,
+   overwrite, and rename files but cannot delete them or use moderation actions.
+
+   Already paired? Enable the file manager without a new pairing code:
+
+   .\OmniVaultAgent.exe --set-files-dir "C:\ProjectReclaimer\Content"
+
+   Stop and restart the agent afterward so the new folder is loaded. The
+   existing agent-config.json is updated in place; the token is preserved.
+
+Managed Reclaimer servers from the panel (optional)
+----------------------------------------------------
+The agent can create, start, stop, and delete extra Project Reclaimer server
+instances without opening a second tunnel or pairing again. The panel writes
+modal server configs and playlists into these folders, but game traffic still
+uses the normal Reclaimer UDP ports, so open/forward those ports for players.
+
+   .\OmniVaultAgent.exe --panel "https://panel.example.com" --pair "1A2B-3C4D" --rcon-port 49176 --instances-dir "C:\OmniVault\instances" --reclaimer-exe "C:\Halo Server\project-reclaimer-dedicated.exe" --server-root "C:\Halo Server"
+
+The server root must be the Reclaimer folder that contains game\ and content\
+(usually the folder holding the .exe). The instances folder can be empty and
+can live outside the server root. Every playlist needs at least three games,
+which is a Project Reclaimer requirement.
+
+Already paired? Add or change the managed-server settings without a new code,
+then restart the agent:
+
+   .\OmniVaultAgent.exe --set-instances-dir "C:\OmniVault\instances"
+   .\OmniVaultAgent.exe --set-reclaimer-exe "C:\Halo Server\project-reclaimer-dedicated.exe"
+   .\OmniVaultAgent.exe --set-server-root "C:\Halo Server"
+
+Only the server owner and team roles with Create server instances can create
+instances. Deleting an instance is owner-only. The agent supervises the child
+processes and stops them when you ask it to.
+
 Run
 ---
 After setup, keep the window open. To start it again later, double-click

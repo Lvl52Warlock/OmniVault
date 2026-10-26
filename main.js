@@ -4,6 +4,7 @@ const electronModule = require('electron');
 const electronApp = (typeof electronModule === 'object' && electronModule !== null && electronModule.app) ? electronModule.app : null;
 const BrowserWindow = (typeof electronModule === 'object' && electronModule !== null && typeof electronModule.BrowserWindow === 'function') ? electronModule.BrowserWindow : null;
 const electronDialog = (typeof electronModule === 'object' && electronModule !== null && electronModule.dialog) ? electronModule.dialog : null;
+const ipcMain = (typeof electronModule === 'object' && electronModule !== null && electronModule.ipcMain) ? electronModule.ipcMain : null;
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
@@ -13,14 +14,67 @@ const { WebSocketServer, WebSocket } = require('ws');
 const rcon = require('./rcon');
 
 const IS_ELECTRON = !!(electronApp && BrowserWindow);
+const PANEL_ASSET_VERSION = (() => {
+  try {
+    const pkg = require('./package.json');
+    if (!IS_ELECTRON || !electronApp.isPackaged) return String(pkg.version || '1.0.0');
+    return String(electronApp.getVersion() || pkg.version || '1.0.0');
+  } catch {
+    return '1.0.0';
+  }
+})();
 const LOCAL_MODE = process.argv.includes('--local') || process.env.PANEL_MODE === 'local';
 const PUBLIC_MODE = process.env.PANEL_PUBLIC_MODE === '1';
 const PORT = Number(process.env.PANEL_PORT) || 49222;
 const BIND_HOST = process.env.PANEL_BIND || '127.0.0.1';
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const AGENT_PAIRING_TTL_MS = 15 * 60 * 1000;
+const TEAM_INVITE_TTL_MS = 24 * 60 * 60 * 1000;
+const INSTANCE_ID_RE = /^inst_[a-f0-9]{16}$/;
 const AGENT_COMMAND_TIMEOUT_MS = 25000;
 const AGENT_MAX_RESULT_CHARS = 256 * 1024;
+const MAX_FILE_UPLOAD_BYTES = 32 * 1024 * 1024;
+const FILE_READ_CHUNK_BYTES = 128 * 1024;
+const FILE_UPLOAD_CHUNK_BYTES = 256 * 1024;
+const LEGACY_TEAM_ROLES = new Set(['moderator', 'developer']);
+const BUILTIN_ROLE_DEFINITIONS = [
+  {
+    key: 'moderator',
+    name: 'Moderator',
+    permissions: ['view', 'kick', 'endRound', 'endGame'],
+  },
+  {
+    key: 'developer',
+    name: 'Developer',
+    permissions: ['view', 'catalog', 'map', 'filesRead', 'filesWrite', 'instancesView', 'instancesCreate', 'instancesControl'],
+  },
+];
+const PERMISSION_CATALOG = [
+  { key: 'view', label: 'View server', description: 'See the server status, map, and player list.' },
+  { key: 'kick', label: 'Kick players', description: 'Remove a player from the current game.' },
+  { key: 'endRound', label: 'End round', description: 'End the current round.' },
+  { key: 'endGame', label: 'End game', description: 'End the current game.' },
+  { key: 'say', label: 'Broadcast messages', description: 'Send a message to everyone on the server.' },
+  { key: 'ban', label: 'Ban players', description: 'Ban a player by name, ID, or address.' },
+  { key: 'unban', label: 'Unban players', description: 'Lift a ban by name, ID, or address.' },
+  { key: 'map', label: 'Change maps', description: 'Load a map or set the next map and mode.' },
+  { key: 'catalog', label: 'Browse maps and modes', description: 'Read the available map and game-type names.' },
+  { key: 'filesRead', label: 'Read server files', description: 'Browse and download allowed server files.' },
+  { key: 'filesWrite', label: 'Change server files', description: 'Upload, overwrite, rename, and create folders.' },
+  { key: 'filesDelete', label: 'Delete server files', description: 'Permanently delete files. Owner only.', ownerOnly: true },
+  { key: 'instancesView', label: 'View server instances', description: 'See Reclaimer instances managed on the agent PC.' },
+  { key: 'instancesCreate', label: 'Create server instances', description: 'Create Reclaimer instances and playlists. Owner and Developer by default.' },
+  { key: 'instancesControl', label: 'Start and stop instances', description: 'Start, stop, and restart Reclaimer instances.' },
+  { key: 'instancesDelete', label: 'Delete server instances', description: 'Remove a managed instance and its files. Owner only.', ownerOnly: true },
+];
+const PERMISSION_KEYS = PERMISSION_CATALOG.map((item) => item.key);
+const OWNER_ONLY_PERMISSIONS = new Set(PERMISSION_CATALOG.filter((item) => item.ownerOnly).map((item) => item.key));
+const GRANTABLE_PERMISSIONS = new Set(PERMISSION_KEYS.filter((key) => !OWNER_ONLY_PERMISSIONS.has(key)));
+const FILE_EXTENSIONS = new Set([
+  '.map', '.gametype', '.gt', '.playlist', '.rotation', '.pdl',
+  '.ini', '.json', '.txt', '.xml', '.cfg', '.yaml', '.yml', '.toml',
+  '.csv', '.md', '.zip', '.pak', '.umap', '.uasset',
+]);
 
 function desktopDataDir() {
   if (IS_ELECTRON && electronApp && typeof electronApp.getPath === 'function') {
@@ -28,7 +82,7 @@ function desktopDataDir() {
   }
   return __dirname;
 }
-const DATA_DIR = desktopDataDir();
+const DATA_DIR = String(process.env.PANEL_DATA_DIR || '').trim() || desktopDataDir();
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const SERVERS_FILE = path.join(DATA_DIR, 'servers.json');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
@@ -40,7 +94,7 @@ const AGENT_UPDATE_KEY_FILE = path.join(__dirname, '..', 'agent-update-private.p
 const AGENT_EXE_FILE = path.join(__dirname, 'agent-dist', 'OmniVaultAgent.exe');
 const DESKTOP_INSTALLER_FILE = path.join(__dirname, 'desktop-dist', 'OmniVault-Setup.exe');
 const AGENT_UPDATE_PACKAGE_FILES = [
-  'agent.js', 'rcon.js', 'package.json', 'update-public.pem',
+  'agent.js', 'rcon.js', 'instances.js', 'package.json', 'update-public.pem',
   'start-agent.ps1', 'start-agent.cmd', 'README.txt',
 ];
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
@@ -49,6 +103,8 @@ const LEGACY_OWNER_USERNAME = 'Warlock';
 const LEGACY_OWNER_ID = 'user_4aadeb472011e8ac';
 
 let mainWindow = null;
+let desktopIpcReady = false;
+let desktopUpdater = null;
 let rateBuckets = new Map();
 const liveAgents = new Map(); // serverId -> live agent socket and pending commands
 
@@ -308,6 +364,11 @@ function migrateData() {
       entry.connectionMode = 'direct';
       serversChanged = true;
     }
+    if (!Array.isArray(entry.members)) {
+      entry.members = [];
+      serversChanged = true;
+    }
+    if (ensureServerRoles(entry)) serversChanged = true;
     let name = String(entry.name || entry.label || '').trim() || `Server ${migrated.length + 1}`;
     const base = name;
     let suffix = 2;
@@ -333,9 +394,203 @@ function normalizeUsername(value) {
 function publicUser(user) {
   return { userId: user.userId, username: user.username, isAdmin: !!user.isAdmin };
 }
-function publicServer(entry) {
+function newRoleId() {
+  return 'role_' + crypto.randomBytes(9).toString('hex');
+}
+function defaultServerRoles() {
+  const createdAt = new Date().toISOString();
+  return BUILTIN_ROLE_DEFINITIONS.map((definition) => ({
+    id: `role_${definition.key}`,
+    key: definition.key,
+    name: definition.name,
+    builtin: true,
+    permissions: definition.permissions.slice(),
+    createdAt,
+  }));
+}
+function normalizeRoleName(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').slice(0, 32);
+}
+function normalizeCustomRolePermissions(value) {
+  const requested = new Set(Array.isArray(value) ? value.map((item) => String(item || '')) : []);
+  requested.add('view');
+  if (requested.has('instancesCreate') || requested.has('instancesControl')) requested.add('instancesView');
+  if (requested.has('filesWrite')) requested.add('filesRead');
+  if (requested.has('map')) requested.add('catalog');
+  return PERMISSION_KEYS.filter((key) => requested.has(key) && GRANTABLE_PERMISSIONS.has(key));
+}
+function findServerRole(entry, roleId) {
+  return (Array.isArray(entry && entry.roles) ? entry.roles : []).find((role) => role && role.id === roleId) || null;
+}
+function publicRoles(entry) {
+  return (Array.isArray(entry && entry.roles) ? entry.roles : []).map((role) => ({
+    id: role.id,
+    key: role.key,
+    name: role.name,
+    builtin: !!role.builtin,
+    permissions: Array.isArray(role.permissions) ? role.permissions.slice() : [],
+  }));
+}
+function ensureServerRoles(entry) {
+  const before = JSON.stringify({
+    roles: entry.roles || null,
+    members: entry.members || null,
+    invite: entry.memberInvite || null,
+  });
+  const existing = Array.isArray(entry.roles) ? entry.roles : [];
+  const roles = [];
+  const usedIds = new Set();
+  const usedNames = new Set();
+  const createdAt = new Date().toISOString();
+
+  for (const definition of BUILTIN_ROLE_DEFINITIONS) {
+    const stored = existing.find((role) => role && (role.key === definition.key || role.id === `role_${definition.key}`));
+    roles.push({
+      id: `role_${definition.key}`,
+      key: definition.key,
+      name: definition.name,
+      builtin: true,
+      permissions: definition.permissions.slice(),
+      createdAt: stored && stored.createdAt ? stored.createdAt : createdAt,
+    });
+    usedIds.add(`role_${definition.key}`);
+    usedNames.add(definition.name.toLowerCase());
+  }
+
+  let customCount = 0;
+  for (const stored of existing) {
+    if (!stored || typeof stored !== 'object') continue;
+    if (BUILTIN_ROLE_DEFINITIONS.some((definition) => (
+      stored.key === definition.key || stored.id === `role_${definition.key}`
+    ))) continue;
+    if (customCount >= 20) break;
+    let name = normalizeRoleName(stored.name);
+    if (!name) continue;
+    const baseName = name;
+    let suffix = 2;
+    while (usedNames.has(name.toLowerCase())) {
+      name = `${baseName.slice(0, 27)} ${suffix}`;
+      suffix += 1;
+    }
+    let id = String(stored.id || '');
+    if (!/^role_[a-f0-9]{18}$/.test(id) || usedIds.has(id)) id = newRoleId();
+    roles.push({
+      id,
+      key: 'custom',
+      name,
+      builtin: false,
+      permissions: normalizeCustomRolePermissions(stored.permissions),
+      createdAt: stored.createdAt || createdAt,
+    });
+    usedIds.add(id);
+    usedNames.add(name.toLowerCase());
+    customCount += 1;
+  }
+
+  entry.roles = roles;
+  entry.members = (Array.isArray(entry.members) ? entry.members : []).map((member) => {
+    if (!member || typeof member.userId !== 'string' || member.userId === entry.ownerId) return null;
+    let roleId = String(member.roleId || '');
+    if (!roleId && LEGACY_TEAM_ROLES.has(member.role)) roleId = `role_${member.role}`;
+    const role = findServerRole(entry, roleId);
+    if (!role) return null;
+    return {
+      userId: member.userId,
+      username: String(member.username || 'Team member').slice(0, 32),
+      roleId: role.id,
+      role: role.key,
+      addedAt: member.addedAt || null,
+      addedBy: member.addedBy || null,
+    };
+  }).filter(Boolean);
+
+  if (entry.memberInvite) {
+    const invite = entry.memberInvite;
+    let roleId = String(invite.roleId || '');
+    if (!roleId && LEGACY_TEAM_ROLES.has(invite.role)) roleId = `role_${invite.role}`;
+    const role = findServerRole(entry, roleId);
+    if (!role || !invite.codeHash || Number(invite.expiresAt) <= Date.now()) {
+      delete entry.memberInvite;
+    } else {
+      entry.memberInvite = {
+        codeHash: invite.codeHash,
+        roleId: role.id,
+        role: role.key,
+        createdBy: invite.createdBy || null,
+        createdAt: invite.createdAt || null,
+        expiresAt: Number(invite.expiresAt),
+      };
+    }
+  }
+
+  return before !== JSON.stringify({
+    roles: entry.roles || null,
+    members: entry.members || null,
+    invite: entry.memberInvite || null,
+  });
+}
+function permissionsForAccess(access) {
+  const allowed = access && access.permissions instanceof Set ? access.permissions : new Set();
+  return Object.fromEntries(PERMISSION_KEYS.map((key) => [key, allowed.has(key)]));
+}
+function ownerAccess() {
+  return {
+    id: 'owner',
+    key: 'owner',
+    name: 'Owner',
+    owner: true,
+    permissions: new Set(PERMISSION_KEYS),
+  };
+}
+function accessFor(entry, user) {
+  if (!entry || !user) return null;
+  if (entry.ownerId === user.userId) return ownerAccess();
+  const member = (Array.isArray(entry.members) ? entry.members : [])
+    .find((item) => item && item.userId === user.userId);
+  if (!member) return null;
+  let role = findServerRole(entry, member.roleId);
+  if (!role && LEGACY_TEAM_ROLES.has(member.role)) role = findServerRole(entry, `role_${member.role}`);
+  if (!role) return null;
+  return {
+    id: role.id,
+    key: role.key,
+    name: role.name,
+    owner: false,
+    permissions: new Set(Array.isArray(role.permissions) ? role.permissions : []),
+  };
+}
+function serverRole(entry, user) {
+  const access = accessFor(entry, user);
+  return access ? access.key : null;
+}
+function can(entry, user, permission) {
+  const access = accessFor(entry, user);
+  return !!(access && access.permissions.has(permission));
+}
+function publicMembers(entry) {
+  return (Array.isArray(entry.members) ? entry.members : [])
+    .map((member) => {
+      if (!member || !member.userId) return null;
+      const role = findServerRole(entry, member.roleId);
+      if (!role) return null;
+      return {
+        userId: member.userId,
+        username: String(member.username || 'Team member'),
+        roleId: role.id,
+        role: role.key,
+        roleName: role.name,
+        addedAt: member.addedAt || null,
+      };
+    })
+    .filter(Boolean);
+}
+function publicServer(entry, viewer) {
   const live = liveAgents.get(entry.id);
   const mode = entry.connectionMode === 'agent' ? 'agent' : 'direct';
+  const access = viewer ? accessFor(entry, viewer) : null;
+  const owner = loadUsers().find((user) => user.userId === entry.ownerId);
+  const invite = entry.memberInvite;
+  const inviteRole = invite ? findServerRole(entry, invite.roleId) : null;
   return {
     id: entry.id,
     name: entry.name || entry.label || '',
@@ -344,10 +599,27 @@ function publicServer(entry) {
     rconPort: Number(entry.rconPort) || 0,
     createdAt: entry.createdAt || null,
     connectionMode: mode,
+    role: access ? access.key : null,
+    roleId: access ? access.id : null,
+    roleName: access ? access.name : null,
+    permissions: permissionsForAccess(access),
+    ownerName: owner ? owner.username : null,
+    members: access && access.owner ? publicMembers(entry) : undefined,
+    roles: access && access.owner ? publicRoles(entry) : undefined,
+    memberInvite: access && access.owner && invite && inviteRole && Number(invite.expiresAt) > Date.now()
+      ? {
+        roleId: inviteRole.id,
+        role: inviteRole.key,
+        roleName: inviteRole.name,
+        expiresAt: new Date(Number(invite.expiresAt)).toISOString(),
+      }
+      : null,
     agentOnline: !!live,
     agentPaired: !!(entry.agentTokenHash),
     agentName: live ? live.agentName : (entry.agentName || null),
     agentVersion: live ? live.agentVersion : (entry.agentVersion || null),
+    filesEnabled: live ? !!live.filesEnabled : !!entry.agentFilesEnabled,
+    instancesEnabled: live ? !!live.instancesEnabled : !!entry.agentInstancesEnabled,
     agentLastSeen: live ? new Date(live.lastSeen).toISOString() : (entry.agentLastSeen || null),
     pairingPending: mode === 'agent' && !!(entry.agentPairingCodeHash && Number(entry.agentPairingExpiresAt) > Date.now()),
     pairingExpiresAt: mode === 'agent' && entry.agentPairingExpiresAt
@@ -441,9 +713,65 @@ function capAgentResult(value) {
     : text;
 }
 
+const ACTION_PERMISSIONS = {
+  status: 'view',
+  players: 'view',
+  say: 'say',
+  kick: 'kick',
+  ban: 'ban',
+  unban: 'unban',
+  map: 'map',
+  load: 'map',
+  nextmap: 'map',
+  endround: 'endRound',
+  endgame: 'endGame',
+  maps: 'catalog',
+  modes: 'catalog',
+};
+function actionPermission(action) {
+  return ACTION_PERMISSIONS[String(action || '')] || '';
+}
+function badRequest(message) {
+  const error = new Error(message);
+  error.status = 400;
+  return error;
+}
+function normalizeRelativeFilePath(value, allowEmpty = true) {
+  const raw = String(value == null ? '' : value).replace(/\\/g, '/').trim();
+  if (!raw) {
+    if (allowEmpty) return '';
+    throw badRequest('A file path is required.');
+  }
+  if (raw.startsWith('/') || /^[A-Za-z]:/.test(raw) || raw.includes('\u0000')) {
+    throw badRequest('Use a path relative to the configured server files folder.');
+  }
+  const parts = raw.split('/').filter((part) => part && part !== '.');
+  if (parts.some((part) => part === '..')) {
+    throw badRequest('The file path cannot leave the server files folder.');
+  }
+  if (!parts.length && !allowEmpty) throw badRequest('A file path is required.');
+  return parts.join('/');
+}
+function assertAllowedFileExtension(filePath) {
+  const extension = path.extname(filePath).toLowerCase();
+  if (!FILE_EXTENSIONS.has(extension)) {
+    throw badRequest('That file type is not allowed in the server files manager.');
+  }
+}
+async function sendAgentJson(entry, action, payload = {}, timeoutMs = AGENT_COMMAND_TIMEOUT_MS) {
+  const raw = await sendAgentCommand(entry, action, payload, timeoutMs);
+  try {
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    throw new Error('The agent returned an invalid file response.');
+  }
+}
 function normalizeAgentAction(body) {
   const action = String((body && body.action) || '');
   const payload = {};
+  const instanceId = String((body && body.instanceId) || '').trim();
+  if (instanceId && !INSTANCE_ID_RE.test(instanceId)) return { error: 'Choose a valid managed server instance.' };
+  if (instanceId) payload.instanceId = instanceId;
   if (action === 'status' || action === 'players' || action === 'endround' || action === 'endgame') {
     return { action, payload };
   }
@@ -488,23 +816,120 @@ function normalizeAgentAction(body) {
 function ownServers(user) {
   return loadServers().filter((entry) => entry.ownerId === user.userId);
 }
+function serversForUser(user) {
+  return loadServers().filter((entry) => !!serverRole(entry, user));
+}
 function findOwnedServerById(id, user) {
   return loadServers().find((entry) => entry.id === id && entry.ownerId === user.userId) || null;
 }
-function findOwnedServerByName(name, user) {
-  return loadServers().find((entry) => (entry.name || entry.label) === name && entry.ownerId === user.userId) || null;
+function findAccessibleServerById(id, user) {
+  return loadServers().find((entry) => entry.id === id && !!serverRole(entry, user)) || null;
 }
-function findOwnedServer(body, user) {
+function findAccessibleServerByName(name, user) {
+  const matches = loadServers().filter((entry) => (entry.name || entry.label) === name && !!serverRole(entry, user));
+  return matches.find((entry) => entry.ownerId === user.userId) || matches[0] || null;
+}
+function findAccessibleServer(body, user) {
   if (!body || typeof body !== 'object') return null;
-  if (body.serverId) return findOwnedServerById(String(body.serverId), user);
-  if (body.server) return findOwnedServerByName(String(body.server), user);
+  if (body.serverId) return findAccessibleServerById(String(body.serverId), user);
+  if (body.server) return findAccessibleServerByName(String(body.server), user);
   return null;
+}
+function normalizeServerRole(entry, value) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  let role = findServerRole(entry, text);
+  const legacy = text.toLowerCase();
+  if (!role && LEGACY_TEAM_ROLES.has(legacy)) role = findServerRole(entry, `role_${legacy}`);
+  return role || null;
+}
+function newTeamCode() {
+  return newPairingCode();
+}
+function setTeamInvite(entry, role, createdBy) {
+  const code = newTeamCode();
+  entry.memberInvite = {
+    codeHash: hashPairingCode(code),
+    roleId: role.id,
+    role: role.key,
+    createdBy,
+    createdAt: new Date().toISOString(),
+    expiresAt: Date.now() + TEAM_INVITE_TTL_MS,
+  };
+  return code;
+}
+function findServerForAction(body, user) {
+  return findAccessibleServer(body, user);
+}
+function assertOwner(entry, user) {
+  return !!entry && entry.ownerId === user.userId;
 }
 function isPrivateHost(host) {
   const bare = String(host || '').replace(/^\[|\]$/g, '');
   if (!bare) return true;
   if (bare.toLowerCase() === 'localhost') return true;
   return net.isIP(bare) ? rcon.isPrivateAddress(bare) : false;
+}
+function cleanInstanceText(value, max) {
+  return String(value == null ? '' : value)
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, max);
+}
+function normalizeInstancePlaylist(value) {
+  const source = value && typeof value === 'object' ? value : {};
+  const rawGames = Array.isArray(source.games) ? source.games : [];
+  if (rawGames.length < 3) throw badRequest('A playlist needs at least three games. Project Reclaimer votes between three different games.');
+  if (rawGames.length > 30) throw badRequest('A playlist can contain at most 30 games.');
+  const seen = new Set();
+  const games = rawGames.map((game, index) => {
+    const map = cleanInstanceText(game && game.map, 160);
+    const mode = cleanInstanceText(game && (game.game || game.mode), 160);
+    if (!map) throw badRequest(`Game ${index + 1} is missing a map.`);
+    if (!mode) throw badRequest(`Game ${index + 1} is missing a game type.`);
+    const key = `${map.toLowerCase()}\u0000${mode.toLowerCase()}`;
+    if (seen.has(key)) throw badRequest('Each playlist game must use a different map and game type.');
+    seen.add(key);
+    return {
+      name: cleanInstanceText(game && game.name, 80) || `${map} · ${mode}`,
+      map,
+      game: mode,
+      antiCheat: !!(game && game.antiCheat),
+    };
+  });
+  const rawVote = Number(source.voteSeconds);
+  const voteSeconds = Number.isInteger(rawVote) && rawVote >= 5 && rawVote <= 300 ? rawVote : 20;
+  return {
+    name: cleanInstanceText(source.name, 80) || 'OmniVault Playlist',
+    voteSeconds,
+    games,
+  };
+}
+function normalizeInstancePayload(body, editing = false) {
+  const payload = {};
+  if (!editing || (body && body.name != null)) {
+    payload.name = cleanInstanceText(body && body.name, 80);
+    if (payload.name.length < 2) throw badRequest('Server name must be 2-80 characters.');
+  }
+  if (!editing || (body && body.port != null && body.port !== '')) {
+    if (body && body.port != null && body.port !== '') {
+      const port = Number(body.port);
+      if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+        throw badRequest('Choose a server port between 1024 and 65535.');
+      }
+      payload.port = port;
+    }
+  }
+  if (body && body.maxPlayers != null && body.maxPlayers !== '') {
+    const maxPlayers = Number(body.maxPlayers);
+    if (!Number.isInteger(maxPlayers) || maxPlayers < 1 || maxPlayers > 127) {
+      throw badRequest('Max players must be 1-127.');
+    }
+    payload.maxPlayers = maxPlayers;
+  }
+  if (body && body.playlist != null) payload.playlist = normalizeInstancePlaylist(body.playlist);
+  return payload;
 }
 function parseServerInput(body, editing) {
   const name = String((body && body.name) || '').trim().slice(0, 80);
@@ -575,7 +1000,51 @@ function optionalAuth(req, res, next) {
 }
 
 // ---------- desktop window ----------
+function getDesktopUpdater() {
+  if (!desktopUpdater) desktopUpdater = require('./desktop-updater');
+  return desktopUpdater;
+}
+
+function registerDesktopIpc() {
+  if (!IS_ELECTRON || !ipcMain || desktopIpcReady) return;
+  desktopIpcReady = true;
+
+  const assertPanelWindow = (event) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) {
+      throw new Error('This update request did not come from the OmniVault window.');
+    }
+  };
+
+  ipcMain.handle('desktop:info', (event) => {
+    assertPanelWindow(event);
+    return { version: electronApp.getVersion(), packaged: !!electronApp.isPackaged };
+  });
+  ipcMain.handle('desktop:update:check', async (event, options) => {
+    assertPanelWindow(event);
+    return getDesktopUpdater().checkForUpdate(options || {});
+  });
+  ipcMain.handle('desktop:update:install', async (event) => {
+    assertPanelWindow(event);
+    return getDesktopUpdater().downloadAndInstall();
+  });
+}
+
 function createWindow(url) {
+  registerDesktopIpc();
+  let panelUrl = url;
+  try {
+    const parsed = new URL(url);
+    // The server redirects "/" to "/webpanel/". Normalize first so the
+    // desktop marker survives that redirect and the panel can expose the
+    // update control only inside the desktop shell.
+    if (!parsed.pathname || parsed.pathname === '/') parsed.pathname = '/webpanel/';
+    parsed.searchParams.set('desktop', '1');
+    // A changing HTML URL also bypasses a stale cached panel after an app
+    // upgrade. The page's CSS and JS links carry the same version marker.
+    parsed.searchParams.set('v', PANEL_ASSET_VERSION);
+    panelUrl = parsed.toString();
+  } catch {}
+
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 900,
@@ -584,10 +1053,11 @@ function createWindow(url) {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      preload: path.join(__dirname, 'preload.js'),
     },
   });
   let allowedOrigin = null;
-  try { allowedOrigin = new URL(url).origin; } catch {}
+  try { allowedOrigin = new URL(panelUrl).origin; } catch {}
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   mainWindow.webContents.on('will-navigate', (event, target) => {
     try {
@@ -596,7 +1066,7 @@ function createWindow(url) {
       event.preventDefault();
     }
   });
-  mainWindow.loadURL(url);
+  mainWindow.loadURL(panelUrl);
 }
 
 function readRemotePanelUrl() {
@@ -643,10 +1113,19 @@ function startServer() {
   // Static assets are an explicit allowlist so users.json, servers.json,
   // sessions.json and the backend source can never be downloaded.
   const webpanelFiles = ['index.html', 'webpanel.js', 'webpanel.css', 'signup.html', 'signup.js'];
+  const sendPanelFile = (res, file) => {
+    // The panel changes with the app and the agent; never let a browser or
+    // Cloudflare keep an old copy of the sign-in page or its scripts.
+    res.setHeader('Cache-Control', 'no-store, max-age=0');
+    res.setHeader('CDN-Cache-Control', 'no-store');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.sendFile(path.join(__dirname, 'webpanel', file));
+  };
   for (const file of webpanelFiles) {
-    web.get(`/webpanel/${file}`, (req, res) => res.sendFile(path.join(__dirname, 'webpanel', file)));
+    web.get(`/webpanel/${file}`, (req, res) => sendPanelFile(res, file));
   }
-  web.get(['/webpanel', '/webpanel/'], (req, res) => res.sendFile(path.join(__dirname, 'webpanel', 'index.html')));
+  web.get(['/webpanel', '/webpanel/'], (req, res) => sendPanelFile(res, 'index.html'));
   web.get('/panel.css', (req, res) => res.sendFile(path.join(__dirname, 'panel.css')));
   web.get('/', (req, res) => res.redirect('/webpanel/'));
   web.get('/index.html', (req, res) => res.redirect('/webpanel/'));
@@ -871,12 +1350,12 @@ function startServer() {
     if (!checkRate(`servers:${req.user.userId}`, 60, 60 * 1000)) {
       return res.status(429).json({ error: 'Too many refreshes. Wait a moment.' });
     }
-    const mine = ownServers(req.user);
+    const mine = serversForUser(req.user);
     const servers = await Promise.all(mine.map(async (entry) => {
       if (entry.connectionMode === 'agent') {
         if (!liveAgents.has(entry.id)) {
           return {
-            ...publicServer(entry),
+            ...publicServer(entry, req.user),
             status: 'Agent offline',
             error: 'Agent is offline. Start the OmniVault agent on the game server.',
             players: '',
@@ -891,11 +1370,11 @@ function startServer() {
         const error = statusResult.status === 'rejected' ? String(statusResult.reason.message || statusResult.reason) : null;
         const players = playersResult.status === 'fulfilled' ? playersResult.value : '';
         const playersError = playersResult.status === 'rejected' ? String(playersResult.reason.message || playersResult.reason) : null;
-        return { ...publicServer(entry), status, error, players, playersError };
+        return { ...publicServer(entry, req.user), status, error, players, playersError };
       }
       if (!req.user.isAdmin) {
         return {
-          ...publicServer(entry),
+          ...publicServer(entry, req.user),
           status: 'Direct RCON restricted',
           error: 'Direct RCON is restricted to the panel administrator. Remove this server and re-add it with Agent mode.',
           players: '',
@@ -908,7 +1387,7 @@ function startServer() {
       const error = statusResult.status === 'rejected' ? String(statusResult.reason.message || statusResult.reason) : null;
       const players = playersResult.status === 'fulfilled' ? playersResult.value : '';
       const playersError = playersResult.status === 'rejected' ? String(playersResult.reason.message || playersResult.reason) : null;
-      return { ...publicServer(entry), status, error, players, playersError };
+      return { ...publicServer(entry, req.user), status, error, players, playersError };
     }));
     res.json({ servers });
   });
@@ -938,6 +1417,8 @@ function startServer() {
         id: newServerId(),
         name,
         ownerId: req.user.userId,
+        members: [],
+        roles: defaultServerRoles(),
         connectionMode: 'agent',
         rconPort: Number.isInteger(rconPort) ? rconPort : 49176,
         createdAt: new Date().toISOString(),
@@ -948,7 +1429,7 @@ function startServer() {
       audit({ type: 'server-create', userId: req.user.userId, username: req.user.username, ip: clientIp(req), serverId: entry.id, serverName: entry.name, mode: 'agent' });
       res.json({
         ok: true,
-        server: publicServer(entry),
+        server: publicServer(entry, req.user),
         pairingCode,
         pairingExpiresAt: new Date(entry.agentPairingExpiresAt).toISOString(),
       });
@@ -970,13 +1451,15 @@ function startServer() {
       port: input.port,
       password: input.password,
       ownerId: req.user.userId,
+      members: [],
+      roles: defaultServerRoles(),
       connectionMode: 'direct',
       createdAt: new Date().toISOString(),
     };
     servers.push(entry);
     saveServers(servers);
     audit({ type: 'server-create', userId: req.user.userId, username: req.user.username, ip: clientIp(req), serverId: entry.id, serverName: entry.name, mode: 'direct' });
-    res.json({ ok: true, server: publicServer(entry) });
+    res.json({ ok: true, server: publicServer(entry, req.user) });
   });
 
   web.put('/api/servers/:id', requireAuth, (req, res) => {
@@ -1013,7 +1496,7 @@ function startServer() {
       if (req.body && req.body.agentName) entry.agentName = String(req.body.agentName).trim().slice(0, 80);
       saveServers(servers);
       catalogCache.delete(entry.id);
-      res.json({ ok: true, server: publicServer(entry) });
+      res.json({ ok: true, server: publicServer(entry, req.user) });
       return;
     }
 
@@ -1028,7 +1511,7 @@ function startServer() {
     if (input.password !== undefined && input.password !== '') entry.password = input.password;
     saveServers(servers);
     catalogCache.delete(entry.id);
-    res.json({ ok: true, server: publicServer(entry) });
+    res.json({ ok: true, server: publicServer(entry, req.user) });
   });
 
   web.post('/api/servers/:id/agent-code', requireAuth, (req, res) => {
@@ -1047,8 +1530,211 @@ function startServer() {
       ok: true,
       pairingCode,
       pairingExpiresAt: new Date(entry.agentPairingExpiresAt).toISOString(),
-      server: publicServer(entry),
+      server: publicServer(entry, req.user),
     });
+  });
+
+  // ---- custom server roles ----
+  web.get('/api/servers/:id/roles', requireAuth, (req, res) => {
+    const entry = findAccessibleServerById(req.params.id, req.user);
+    if (!entry) return res.status(404).json({ error: 'Server not found on your account or a team you joined.' });
+    const access = accessFor(entry, req.user);
+    res.json({
+      roles: publicRoles(entry),
+      permissions: PERMISSION_CATALOG,
+      canManage: !!access && access.owner,
+    });
+  });
+
+  web.post('/api/servers/:id/roles', requireAuth, (req, res) => {
+    if (!checkRate(`role-write:${req.user.userId}`, 40, 60 * 60 * 1000)) {
+      return res.status(429).json({ error: 'Too many role changes. Try again later.' });
+    }
+    const entry = findOwnedServerById(req.params.id, req.user);
+    if (!entry) return res.status(404).json({ error: 'Server not found on your account.' });
+    const customCount = (entry.roles || []).filter((role) => !role.builtin).length;
+    if (customCount >= 20) return res.status(400).json({ error: 'You can create at most 20 custom roles per server.' });
+    const name = normalizeRoleName(req.body && req.body.name);
+    if (name.length < 2) return res.status(400).json({ error: 'Role names must be 2-32 characters.' });
+    const reserved = new Set(['owner', ...BUILTIN_ROLE_DEFINITIONS.map((definition) => definition.name.toLowerCase())]);
+    if (reserved.has(name.toLowerCase())) return res.status(409).json({ error: 'That role name is reserved.' });
+    if ((entry.roles || []).some((role) => role.name.toLowerCase() === name.toLowerCase())) {
+      return res.status(409).json({ error: 'A role with that name already exists.' });
+    }
+    const role = {
+      id: newRoleId(),
+      key: 'custom',
+      name,
+      builtin: false,
+      permissions: normalizeCustomRolePermissions(req.body && req.body.permissions),
+      createdAt: new Date().toISOString(),
+    };
+    entry.roles = [...(entry.roles || []), role];
+    saveServers(loadServers().map((item) => (item.id === entry.id ? entry : item)));
+    audit({ type: 'role-create', userId: req.user.userId, username: req.user.username, serverId: entry.id, serverName: entry.name, roleId: role.id, roleName: role.name, ip: clientIp(req) });
+    res.json({ ok: true, role, roles: publicRoles(entry), permissions: PERMISSION_CATALOG });
+  });
+
+  web.patch('/api/servers/:id/roles/:roleId', requireAuth, (req, res) => {
+    if (!checkRate(`role-write:${req.user.userId}`, 40, 60 * 60 * 1000)) {
+      return res.status(429).json({ error: 'Too many role changes. Try again later.' });
+    }
+    const entry = findOwnedServerById(req.params.id, req.user);
+    if (!entry) return res.status(404).json({ error: 'Server not found on your account.' });
+    const role = findServerRole(entry, req.params.roleId);
+    if (!role) return res.status(404).json({ error: 'Role not found.' });
+    if (role.builtin) return res.status(400).json({ error: 'The Moderator and Developer roles are built in and cannot be edited.' });
+    const name = normalizeRoleName(req.body && req.body.name);
+    if (name.length < 2) return res.status(400).json({ error: 'Role names must be 2-32 characters.' });
+    const reserved = new Set(['owner', ...BUILTIN_ROLE_DEFINITIONS.map((definition) => definition.name.toLowerCase())]);
+    if (reserved.has(name.toLowerCase())) return res.status(409).json({ error: 'That role name is reserved.' });
+    if ((entry.roles || []).some((item) => item.id !== role.id && item.name.toLowerCase() === name.toLowerCase())) {
+      return res.status(409).json({ error: 'A role with that name already exists.' });
+    }
+    role.name = name;
+    if (Array.isArray(req.body && req.body.permissions)) {
+      role.permissions = normalizeCustomRolePermissions(req.body.permissions);
+    }
+    saveServers(loadServers().map((item) => (item.id === entry.id ? entry : item)));
+    audit({ type: 'role-update', userId: req.user.userId, username: req.user.username, serverId: entry.id, serverName: entry.name, roleId: role.id, roleName: role.name, ip: clientIp(req) });
+    res.json({ ok: true, role, roles: publicRoles(entry), permissions: PERMISSION_CATALOG });
+  });
+
+  web.delete('/api/servers/:id/roles/:roleId', requireAuth, (req, res) => {
+    if (!checkRate(`role-write:${req.user.userId}`, 40, 60 * 60 * 1000)) {
+      return res.status(429).json({ error: 'Too many role changes. Try again later.' });
+    }
+    const entry = findOwnedServerById(req.params.id, req.user);
+    if (!entry) return res.status(404).json({ error: 'Server not found on your account.' });
+    const role = findServerRole(entry, req.params.roleId);
+    if (!role) return res.status(404).json({ error: 'Role not found.' });
+    if (role.builtin) return res.status(400).json({ error: 'The Moderator and Developer roles are built in and cannot be deleted.' });
+    if ((entry.members || []).some((member) => member.roleId === role.id)) {
+      return res.status(409).json({ error: 'Move the people using this role to another role before deleting it.' });
+    }
+    if (entry.memberInvite && entry.memberInvite.roleId === role.id) {
+      return res.status(409).json({ error: 'Replace the active invitation before deleting this role.' });
+    }
+    entry.roles = (entry.roles || []).filter((item) => item.id !== role.id);
+    saveServers(loadServers().map((item) => (item.id === entry.id ? entry : item)));
+    audit({ type: 'role-delete', userId: req.user.userId, username: req.user.username, serverId: entry.id, serverName: entry.name, roleId: role.id, roleName: role.name, ip: clientIp(req) });
+    res.json({ ok: true, roles: publicRoles(entry), permissions: PERMISSION_CATALOG });
+  });
+
+  // ---- server team access ----
+  web.get('/api/servers/:id/access', requireAuth, (req, res) => {
+    const entry = findOwnedServerById(req.params.id, req.user);
+    if (!entry) return res.status(404).json({ error: 'Server not found on your account.' });
+    const inviteRole = entry.memberInvite ? findServerRole(entry, entry.memberInvite.roleId) : null;
+    const invite = entry.memberInvite && inviteRole && Number(entry.memberInvite.expiresAt) > Date.now()
+      ? {
+        roleId: inviteRole.id,
+        role: inviteRole.key,
+        roleName: inviteRole.name,
+        expiresAt: new Date(Number(entry.memberInvite.expiresAt)).toISOString(),
+      }
+      : null;
+    res.json({
+      members: publicMembers(entry),
+      roles: publicRoles(entry),
+      permissions: PERMISSION_CATALOG,
+      invite,
+    });
+  });
+
+  web.post('/api/servers/:id/access/invite', requireAuth, (req, res) => {
+    if (!checkRate(`team-invite:${req.user.userId}`, 30, 60 * 60 * 1000)) {
+      return res.status(429).json({ error: 'Too many team invitations. Try again later.' });
+    }
+    const entry = findOwnedServerById(req.params.id, req.user);
+    if (!entry) return res.status(404).json({ error: 'Server not found on your account.' });
+    const role = normalizeServerRole(entry, (req.body && (req.body.roleId || req.body.role)) || '');
+    if (!role) return res.status(400).json({ error: 'Choose a role for the invitation.' });
+    const code = setTeamInvite(entry, role, req.user.userId);
+    saveServers(loadServers().map((item) => (item.id === entry.id ? entry : item)));
+    audit({ type: 'team-invite', userId: req.user.userId, username: req.user.username, serverId: entry.id, serverName: entry.name, role: role.key, roleName: role.name, ip: clientIp(req) });
+    res.json({
+      ok: true,
+      code,
+      roleId: role.id,
+      role: role.key,
+      roleName: role.name,
+      expiresAt: new Date(entry.memberInvite.expiresAt).toISOString(),
+    });
+  });
+
+  web.patch('/api/servers/:id/members/:userId', requireAuth, (req, res) => {
+    if (!checkRate(`team-manage:${req.user.userId}`, 60, 60 * 60 * 1000)) {
+      return res.status(429).json({ error: 'Too many team changes. Try again later.' });
+    }
+    const entry = findOwnedServerById(req.params.id, req.user);
+    if (!entry) return res.status(404).json({ error: 'Server not found on your account.' });
+    const role = normalizeServerRole(entry, (req.body && (req.body.roleId || req.body.role)) || '');
+    if (!role) return res.status(400).json({ error: 'Choose a role for this team member.' });
+    const member = (entry.members || []).find((item) => item.userId === req.params.userId);
+    if (!member) return res.status(404).json({ error: 'That person is not on this server team.' });
+    member.roleId = role.id;
+    member.role = role.key;
+    saveServers(loadServers().map((item) => (item.id === entry.id ? entry : item)));
+    audit({ type: 'team-role-change', userId: req.user.userId, username: req.user.username, serverId: entry.id, serverName: entry.name, targetUserId: member.userId, role: role.key, roleName: role.name, ip: clientIp(req) });
+    res.json({ ok: true, members: publicMembers(entry), roles: publicRoles(entry) });
+  });
+
+  web.delete('/api/servers/:id/members/:userId', requireAuth, (req, res) => {
+    if (!checkRate(`team-manage:${req.user.userId}`, 60, 60 * 60 * 1000)) {
+      return res.status(429).json({ error: 'Too many team changes. Try again later.' });
+    }
+    const entry = findOwnedServerById(req.params.id, req.user);
+    if (!entry) return res.status(404).json({ error: 'Server not found on your account.' });
+    const before = Array.isArray(entry.members) ? entry.members.length : 0;
+    entry.members = (entry.members || []).filter((member) => member.userId !== req.params.userId);
+    if (entry.members.length === before) return res.status(404).json({ error: 'That person is not on this server team.' });
+    saveServers(loadServers().map((item) => (item.id === entry.id ? entry : item)));
+    audit({ type: 'team-remove', userId: req.user.userId, username: req.user.username, serverId: entry.id, serverName: entry.name, targetUserId: req.params.userId, ip: clientIp(req) });
+    res.json({ ok: true, members: publicMembers(entry) });
+  });
+
+  web.post('/api/servers/join', requireAuth, (req, res) => {
+    if (!checkRate(`team-join:${req.user.userId}`, 12, 60 * 60 * 1000)) {
+      return res.status(429).json({ error: 'Too many join attempts. Try again later.' });
+    }
+    const rawCode = String((req.body && req.body.code) || '');
+    if (normalizePairingCode(rawCode).length !== 8) {
+      return res.status(400).json({ error: 'That access code is invalid or has expired.' });
+    }
+    const codeHash = hashPairingCode(rawCode);
+    const servers = loadServers();
+    const entry = servers.find((item) => (
+      item.memberInvite
+      && item.memberInvite.codeHash === codeHash
+      && Number(item.memberInvite.expiresAt) > Date.now()
+    ));
+    if (!entry) return res.status(404).json({ error: 'That access code is invalid or has expired.' });
+    if (entry.ownerId === req.user.userId) {
+      return res.status(400).json({ error: 'You already own this server.' });
+    }
+    const role = findServerRole(entry, entry.memberInvite.roleId);
+    if (!role) return res.status(400).json({ error: 'That invitation has an invalid role.' });
+    entry.members = Array.isArray(entry.members) ? entry.members : [];
+    const existing = entry.members.find((member) => member.userId === req.user.userId);
+    if (existing) {
+      existing.roleId = role.id;
+      existing.role = role.key;
+      existing.username = req.user.username;
+    } else {
+      entry.members.push({
+        userId: req.user.userId,
+        username: req.user.username,
+        roleId: role.id,
+        role: role.key,
+        addedAt: new Date().toISOString(),
+        addedBy: entry.memberInvite.createdBy || null,
+      });
+    }
+    delete entry.memberInvite;
+    saveServers(servers);
+    audit({ type: 'team-join', userId: req.user.userId, username: req.user.username, serverId: entry.id, serverName: entry.name, role: role.key, roleName: role.name, ip: clientIp(req) });
+    res.json({ ok: true, server: publicServer(entry, req.user) });
   });
 
   web.delete('/api/servers/:id', requireAuth, (req, res) => {
@@ -1071,27 +1757,44 @@ function startServer() {
     if (!checkRate(`action:${req.user.userId}`, 120, 60 * 1000)) {
       return res.status(429).json({ error: 'Too many RCON actions. Wait a moment.' });
     }
-    const entry = findOwnedServer(req.body, req.user);
-    if (!entry) return res.status(404).json({ error: 'Server not found on your account.' });
+    const entry = findAccessibleServer(req.body, req.user);
+    if (!entry) return res.status(404).json({ error: 'Server not found on your account or a team you joined.' });
     const action = String((req.body && req.body.action) || '');
+    const role = serverRole(entry, req.user);
+    const permission = actionPermission(action);
+    if (!permission || !can(entry, req.user, permission)) {
+      return res.status(403).json({ error: 'Your role does not allow that action on this server.' });
+    }
+    const requestedInstanceId = String((req.body && req.body.instanceId) || '').trim();
+    if (requestedInstanceId) {
+      if (!INSTANCE_ID_RE.test(requestedInstanceId)) {
+        return res.status(400).json({ error: 'Choose a valid managed server instance.' });
+      }
+      if (entry.connectionMode !== 'agent') {
+        return res.status(400).json({ error: 'Managed server instances require Agent mode.' });
+      }
+      if (!can(entry, req.user, 'instancesView')) {
+        return res.status(403).json({ error: 'Your role does not allow access to managed server instances.' });
+      }
+    }
+    if (entry.connectionMode === 'direct' && !req.user.isAdmin) {
+      return res.status(403).json({ error: 'Direct RCON is restricted to the panel administrator. Use Agent mode; it needs no port forwarding.' });
+    }
 
     if (entry.connectionMode === 'agent') {
       const request = normalizeAgentAction(req.body);
       if (request.error) return res.status(400).json({ error: request.error });
       try {
         const result = await sendAgentCommand(entry, request.action, request.payload);
-        audit({ type: 'action', userId: req.user.userId, username: req.user.username, ip: clientIp(req), serverId: entry.id, serverName: entry.name, action: request.action, ok: true });
+        audit({ type: 'action', userId: req.user.userId, username: req.user.username, role, ip: clientIp(req), serverId: entry.id, serverName: entry.name, action: request.action, ok: true });
         res.json({ result: result || 'Command sent.' });
       } catch (error) {
-        audit({ type: 'action', userId: req.user.userId, username: req.user.username, ip: clientIp(req), serverId: entry.id, serverName: entry.name, action: request.action, ok: false, error: String(error.message || error) });
+        audit({ type: 'action', userId: req.user.userId, username: req.user.username, role, ip: clientIp(req), serverId: entry.id, serverName: entry.name, action: request.action, ok: false, error: String(error.message || error) });
         res.status(502).json({ error: String(error.message || error) });
       }
       return;
     }
 
-    if (!req.user.isAdmin) {
-      return res.status(403).json({ error: 'Direct RCON is restricted to the panel administrator. Use Agent mode; it needs no port forwarding.' });
-    }
     const rc = rcon.make(entry, { allowPrivate: req.user.isAdmin });
     try {
       let result;
@@ -1132,10 +1835,347 @@ function startServer() {
       } else {
         return res.status(400).json({ error: 'Unknown action.' });
       }
-      audit({ type: 'action', userId: req.user.userId, username: req.user.username, ip: clientIp(req), serverId: entry.id, serverName: entry.name, action, ok: true });
+      audit({ type: 'action', userId: req.user.userId, username: req.user.username, role, ip: clientIp(req), serverId: entry.id, serverName: entry.name, action, ok: true });
       res.json({ result: result || 'Command sent.' });
     } catch (error) {
-      audit({ type: 'action', userId: req.user.userId, username: req.user.username, ip: clientIp(req), serverId: entry.id, serverName: entry.name, action, ok: false, error: String(error.message || error) });
+      audit({ type: 'action', userId: req.user.userId, username: req.user.username, role, ip: clientIp(req), serverId: entry.id, serverName: entry.name, action, ok: false, error: String(error.message || error) });
+      res.status(502).json({ error: String(error.message || error) });
+    }
+  });
+
+  // ---- server files ----
+  web.get('/api/servers/:id/files', requireAuth, async (req, res) => {
+    if (!checkRate(`files-list:${req.user.userId}`, 120, 60 * 1000)) {
+      return res.status(429).json({ error: 'Too many file requests. Wait a moment.' });
+    }
+    const entry = findAccessibleServerById(req.params.id, req.user);
+    if (!entry) return res.status(404).json({ error: 'Server not found on your account or a team you joined.' });
+    if (!can(entry, req.user, 'filesRead')) return res.status(403).json({ error: 'Your role does not allow file access on this server.' });
+    if (entry.connectionMode !== 'agent') return res.status(400).json({ error: 'The server files manager requires Agent mode.' });
+    try {
+      const dir = normalizeRelativeFilePath(req.query.path || '');
+      const data = await sendAgentJson(entry, 'files-list', { path: dir }, 20000);
+      res.json({
+        path: dir,
+        entries: Array.isArray(data.entries) ? data.entries : [],
+        configured: data.configured !== false,
+      });
+    } catch (error) {
+      res.status(error.status === 400 ? 400 : 502).json({ error: String(error.message || error) });
+    }
+  });
+
+  web.get('/api/servers/:id/files/download', requireAuth, async (req, res) => {
+    if (!checkRate(`files-download:${req.user.userId}`, 120, 60 * 1000)) {
+      return res.status(429).json({ error: 'Too many file downloads. Wait a moment.' });
+    }
+    const entry = findAccessibleServerById(req.params.id, req.user);
+    if (!entry) return res.status(404).json({ error: 'Server not found on your account or a team you joined.' });
+    if (!can(entry, req.user, 'filesRead')) return res.status(403).json({ error: 'Your role does not allow file access on this server.' });
+    if (entry.connectionMode !== 'agent') return res.status(400).json({ error: 'The server files manager requires Agent mode.' });
+    let filePath;
+    let stat;
+    try {
+      filePath = normalizeRelativeFilePath(req.query.path || '', false);
+      assertAllowedFileExtension(filePath);
+      stat = await sendAgentJson(entry, 'files-stat', { path: filePath }, 20000);
+    } catch (error) {
+      return res.status(error.status === 400 ? 400 : 502).json({ error: String(error.message || error) });
+    }
+    const size = Number(stat.size);
+    if (!Number.isInteger(size) || size < 0) return res.status(502).json({ error: 'The agent returned an invalid file size.' });
+    const name = String(stat.name || filePath.split('/').pop() || 'download');
+    const asciiName = name.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
+    const sendFileHeaders = () => {
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Length', String(size));
+      res.setHeader('Content-Disposition', `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(name)}`);
+    };
+    try {
+      let offset = 0;
+      let started = false;
+      while (offset < size) {
+        const chunk = await sendAgentJson(entry, 'files-read', {
+          path: filePath,
+          offset,
+          length: Math.min(FILE_READ_CHUNK_BYTES, size - offset),
+        }, 30000);
+        const data = Buffer.from(String(chunk.data || ''), 'base64');
+        if (!data.length) throw new Error('The agent returned an empty file chunk.');
+        if (!started) {
+          sendFileHeaders();
+          started = true;
+        }
+        offset += data.length;
+        if (!res.write(data)) {
+          await new Promise((resolve) => res.once('drain', resolve));
+        }
+      }
+      if (!started) sendFileHeaders();
+      res.end();
+    } catch (error) {
+      audit({ type: 'files-download', userId: req.user.userId, username: req.user.username, serverId: entry.id, serverName: entry.name, path: filePath, ok: false, error: String(error.message || error) });
+      if (!res.headersSent) res.status(error.status === 400 ? 400 : 502).json({ error: String(error.message || error) });
+      else res.destroy();
+    }
+  });
+
+  web.post('/api/servers/:id/files/upload', requireAuth, express.raw({ type: () => true, limit: MAX_FILE_UPLOAD_BYTES }), async (req, res) => {
+    if (!checkRate(`files-upload:${req.user.userId}`, 20, 10 * 60 * 1000)) {
+      return res.status(429).json({ error: 'Too many file uploads. Try again later.' });
+    }
+    const entry = findAccessibleServerById(req.params.id, req.user);
+    if (!entry) return res.status(404).json({ error: 'Server not found on your account or a team you joined.' });
+    if (!can(entry, req.user, 'filesWrite')) return res.status(403).json({ error: 'Your role does not allow file changes on this server.' });
+    if (entry.connectionMode !== 'agent') return res.status(400).json({ error: 'The server files manager requires Agent mode.' });
+    let filePath = '';
+    let uploadId = '';
+    try {
+      filePath = normalizeRelativeFilePath(req.query.path || '', false);
+      assertAllowedFileExtension(filePath);
+      const data = req.body;
+      if (!Buffer.isBuffer(data) || !data.length) return res.status(400).json({ error: 'Choose a file to upload.' });
+      if (data.length > MAX_FILE_UPLOAD_BYTES) return res.status(413).json({ error: 'That file is too large. The limit is 32 MB.' });
+      const begin = await sendAgentJson(entry, 'files-upload-begin', { path: filePath, size: data.length }, 20000);
+      uploadId = String(begin.uploadId || '');
+      if (!uploadId) throw new Error('The agent did not start the upload.');
+      for (let offset = 0; offset < data.length; offset += FILE_UPLOAD_CHUNK_BYTES) {
+        await sendAgentJson(entry, 'files-upload-chunk', {
+          uploadId,
+          data: data.subarray(offset, offset + FILE_UPLOAD_CHUNK_BYTES).toString('base64'),
+        }, 30000);
+      }
+      await sendAgentJson(entry, 'files-upload-end', { uploadId }, 30000);
+      uploadId = '';
+      audit({ type: 'files-upload', userId: req.user.userId, username: req.user.username, serverId: entry.id, serverName: entry.name, path: filePath, size: data.length, ok: true });
+      res.json({ ok: true, path: filePath, size: data.length });
+    } catch (error) {
+      if (uploadId) {
+        try { await sendAgentJson(entry, 'files-upload-abort', { uploadId }, 10000); } catch {}
+      }
+      audit({ type: 'files-upload', userId: req.user.userId, username: req.user.username, serverId: entry.id, serverName: entry.name, path: filePath, ok: false, error: String(error.message || error) });
+      res.status(error.status === 400 ? 400 : 502).json({ error: String(error.message || error) });
+    }
+  });
+
+  web.post('/api/servers/:id/files/mkdir', requireAuth, async (req, res) => {
+    if (!checkRate(`files-write:${req.user.userId}`, 120, 60 * 1000)) {
+      return res.status(429).json({ error: 'Too many file changes. Wait a moment.' });
+    }
+    const entry = findAccessibleServerById(req.params.id, req.user);
+    if (!entry) return res.status(404).json({ error: 'Server not found on your account or a team you joined.' });
+    if (!can(entry, req.user, 'filesWrite')) return res.status(403).json({ error: 'Your role does not allow file changes on this server.' });
+    if (entry.connectionMode !== 'agent') return res.status(400).json({ error: 'The server files manager requires Agent mode.' });
+    try {
+      const dir = normalizeRelativeFilePath(req.body && req.body.path, false);
+      await sendAgentJson(entry, 'files-mkdir', { path: dir }, 20000);
+      audit({ type: 'files-mkdir', userId: req.user.userId, username: req.user.username, serverId: entry.id, serverName: entry.name, path: dir, ok: true });
+      res.json({ ok: true, path: dir });
+    } catch (error) {
+      res.status(error.status === 400 ? 400 : 502).json({ error: String(error.message || error) });
+    }
+  });
+
+  web.post('/api/servers/:id/files/rename', requireAuth, async (req, res) => {
+    if (!checkRate(`files-write:${req.user.userId}`, 120, 60 * 1000)) {
+      return res.status(429).json({ error: 'Too many file changes. Wait a moment.' });
+    }
+    const entry = findAccessibleServerById(req.params.id, req.user);
+    if (!entry) return res.status(404).json({ error: 'Server not found on your account or a team you joined.' });
+    if (!can(entry, req.user, 'filesWrite')) return res.status(403).json({ error: 'Your role does not allow file changes on this server.' });
+    if (entry.connectionMode !== 'agent') return res.status(400).json({ error: 'The server files manager requires Agent mode.' });
+    try {
+      const from = normalizeRelativeFilePath(req.body && (req.body.from || req.body.path), false);
+      const to = normalizeRelativeFilePath(req.body && (req.body.to || req.body.name), false);
+      await sendAgentJson(entry, 'files-rename', { from, to }, 20000);
+      audit({ type: 'files-rename', userId: req.user.userId, username: req.user.username, serverId: entry.id, serverName: entry.name, from, to, ok: true });
+      res.json({ ok: true, from, to });
+    } catch (error) {
+      res.status(error.status === 400 ? 400 : 502).json({ error: String(error.message || error) });
+    }
+  });
+
+  web.delete('/api/servers/:id/files', requireAuth, async (req, res) => {
+    if (!checkRate(`files-delete:${req.user.userId}`, 60, 60 * 60 * 1000)) {
+      return res.status(429).json({ error: 'Too many file deletions. Try again later.' });
+    }
+    const entry = findAccessibleServerById(req.params.id, req.user);
+    if (!entry) return res.status(404).json({ error: 'Server not found on your account or a team you joined.' });
+    if (!can(entry, req.user, 'filesDelete')) return res.status(403).json({ error: 'Only the server owner can delete files.' });
+    if (entry.connectionMode !== 'agent') return res.status(400).json({ error: 'The server files manager requires Agent mode.' });
+    try {
+      const target = normalizeRelativeFilePath(req.query.path || '', false);
+      await sendAgentJson(entry, 'files-delete', { path: target }, 20000);
+      audit({ type: 'files-delete', userId: req.user.userId, username: req.user.username, serverId: entry.id, serverName: entry.name, path: target, ok: true });
+      res.json({ ok: true, path: target });
+    } catch (error) {
+      res.status(error.status === 400 ? 400 : 502).json({ error: String(error.message || error) });
+    }
+  });
+
+  // ---- managed Reclaimer instances ----
+  function instanceRouteContext(req, res, permission) {
+    const entry = findAccessibleServerById(req.params.id, req.user);
+    if (!entry) {
+      res.status(404).json({ error: 'Server not found on your account or a team you joined.' });
+      return null;
+    }
+    if (!can(entry, req.user, permission)) {
+      res.status(403).json({ error: 'Your role does not allow that instance action on this server.' });
+      return null;
+    }
+    if (entry.connectionMode !== 'agent') {
+      res.status(400).json({ error: 'Managed server instances require Agent mode.' });
+      return null;
+    }
+    const live = liveAgents.get(entry.id);
+    if (!live || live.socket.readyState !== WebSocket.OPEN) {
+      res.status(409).json({ error: 'The agent is offline. Start OmniVaultAgent.exe on the game-server PC.' });
+      return null;
+    }
+    return entry;
+  }
+
+  function instanceIdFromParams(req, res) {
+    const id = String(req.params.instanceId || '');
+    if (!INSTANCE_ID_RE.test(id)) {
+      res.status(400).json({ error: 'Choose a valid managed server instance.' });
+      return '';
+    }
+    return id;
+  }
+
+  web.get('/api/servers/:id/instances', requireAuth, async (req, res) => {
+    if (!checkRate(`instances:${req.user.userId}`, 120, 60 * 1000)) {
+      return res.status(429).json({ error: 'Too many instance requests. Wait a moment.' });
+    }
+    const entry = instanceRouteContext(req, res, 'instancesView');
+    if (!entry) return;
+    try {
+      const data = await sendAgentJson(entry, 'instances-list', {}, 25000);
+      res.json(data);
+    } catch (error) {
+      res.status(502).json({ error: String(error.message || error) });
+    }
+  });
+
+  web.post('/api/servers/:id/instances', requireAuth, async (req, res) => {
+    if (!checkRate(`instance-write:${req.user.userId}`, 40, 60 * 60 * 1000)) {
+      return res.status(429).json({ error: 'Too many instance changes. Try again later.' });
+    }
+    const entry = instanceRouteContext(req, res, 'instancesCreate');
+    if (!entry) return;
+    let payload;
+    try {
+      payload = normalizeInstancePayload(req.body, false);
+      payload.start = !(req.body && req.body.start === false);
+    } catch (error) {
+      return res.status(error.status === 400 ? 400 : 500).json({ error: String(error.message || error) });
+    }
+    try {
+      const data = await sendAgentJson(entry, 'instance-create', payload, 75000);
+      audit({ type: 'instance-create', userId: req.user.userId, username: req.user.username, role: serverRole(entry, req.user), ip: clientIp(req), serverId: entry.id, serverName: entry.name, instanceId: data && data.instance ? data.instance.id : null, instanceName: payload.name, ok: true });
+      res.json(data);
+    } catch (error) {
+      audit({ type: 'instance-create', userId: req.user.userId, username: req.user.username, role: serverRole(entry, req.user), ip: clientIp(req), serverId: entry.id, serverName: entry.name, instanceName: payload.name, ok: false, error: String(error.message || error) });
+      res.status(502).json({ error: String(error.message || error) });
+    }
+  });
+
+  web.patch('/api/servers/:id/instances/:instanceId', requireAuth, async (req, res) => {
+    if (!checkRate(`instance-write:${req.user.userId}`, 40, 60 * 60 * 1000)) {
+      return res.status(429).json({ error: 'Too many instance changes. Try again later.' });
+    }
+    const entry = instanceRouteContext(req, res, 'instancesCreate');
+    if (!entry) return;
+    const instanceId = instanceIdFromParams(req, res);
+    if (!instanceId) return;
+    let payload;
+    try {
+      payload = normalizeInstancePayload(req.body, true);
+    } catch (error) {
+      return res.status(error.status === 400 ? 400 : 500).json({ error: String(error.message || error) });
+    }
+    payload.instanceId = instanceId;
+    try {
+      const data = await sendAgentJson(entry, 'instance-update', payload, 75000);
+      audit({ type: 'instance-update', userId: req.user.userId, username: req.user.username, role: serverRole(entry, req.user), ip: clientIp(req), serverId: entry.id, serverName: entry.name, instanceId, ok: true });
+      res.json(data);
+    } catch (error) {
+      audit({ type: 'instance-update', userId: req.user.userId, username: req.user.username, role: serverRole(entry, req.user), ip: clientIp(req), serverId: entry.id, serverName: entry.name, instanceId, ok: false, error: String(error.message || error) });
+      res.status(502).json({ error: String(error.message || error) });
+    }
+  });
+
+  web.post('/api/servers/:id/instances/:instanceId/:operation', requireAuth, async (req, res) => {
+    if (!checkRate(`instance-control:${req.user.userId}`, 60, 60 * 1000)) {
+      return res.status(429).json({ error: 'Too many instance controls. Wait a moment.' });
+    }
+    const operation = String(req.params.operation || '');
+    if (!['start', 'stop', 'restart'].includes(operation)) {
+      return res.status(404).json({ error: 'Instance operation not found.' });
+    }
+    const entry = instanceRouteContext(req, res, 'instancesControl');
+    if (!entry) return;
+    const instanceId = instanceIdFromParams(req, res);
+    if (!instanceId) return;
+    try {
+      const data = await sendAgentJson(entry, `instance-${operation}`, { instanceId }, operation === 'stop' ? 25000 : 75000);
+      audit({ type: `instance-${operation}`, userId: req.user.userId, username: req.user.username, role: serverRole(entry, req.user), ip: clientIp(req), serverId: entry.id, serverName: entry.name, instanceId, ok: true });
+      res.json(data);
+    } catch (error) {
+      audit({ type: `instance-${operation}`, userId: req.user.userId, username: req.user.username, role: serverRole(entry, req.user), ip: clientIp(req), serverId: entry.id, serverName: entry.name, instanceId, ok: false, error: String(error.message || error) });
+      res.status(502).json({ error: String(error.message || error) });
+    }
+  });
+
+  web.get('/api/servers/:id/instances/:instanceId/status', requireAuth, async (req, res) => {
+    if (!checkRate(`instance-status:${req.user.userId}`, 240, 60 * 1000)) {
+      return res.status(429).json({ error: 'Too many status requests. Wait a moment.' });
+    }
+    const entry = instanceRouteContext(req, res, 'instancesView');
+    if (!entry) return;
+    const instanceId = instanceIdFromParams(req, res);
+    if (!instanceId) return;
+    try {
+      const data = await sendAgentJson(entry, 'instance-status', { instanceId }, 25000);
+      res.json(data);
+    } catch (error) {
+      res.status(502).json({ error: String(error.message || error) });
+    }
+  });
+
+  web.get('/api/servers/:id/instances/:instanceId/logs', requireAuth, async (req, res) => {
+    if (!checkRate(`instance-logs:${req.user.userId}`, 120, 60 * 1000)) {
+      return res.status(429).json({ error: 'Too many log requests. Wait a moment.' });
+    }
+    const entry = instanceRouteContext(req, res, 'instancesView');
+    if (!entry) return;
+    const instanceId = instanceIdFromParams(req, res);
+    if (!instanceId) return;
+    try {
+      const data = await sendAgentJson(entry, 'instance-logs', { instanceId }, 25000);
+      if (data && typeof data.text === 'string') data.text = data.text.slice(-24 * 1024);
+      res.json(data);
+    } catch (error) {
+      res.status(502).json({ error: String(error.message || error) });
+    }
+  });
+
+  web.delete('/api/servers/:id/instances/:instanceId', requireAuth, async (req, res) => {
+    if (!checkRate(`instance-delete:${req.user.userId}`, 20, 60 * 60 * 1000)) {
+      return res.status(429).json({ error: 'Too many instance deletions. Try again later.' });
+    }
+    const entry = instanceRouteContext(req, res, 'instancesDelete');
+    if (!entry) return;
+    const instanceId = instanceIdFromParams(req, res);
+    if (!instanceId) return;
+    try {
+      const data = await sendAgentJson(entry, 'instance-delete', { instanceId }, 30000);
+      audit({ type: 'instance-delete', userId: req.user.userId, username: req.user.username, role: serverRole(entry, req.user), ip: clientIp(req), serverId: entry.id, serverName: entry.name, instanceId, ok: true });
+      res.json(data);
+    } catch (error) {
+      audit({ type: 'instance-delete', userId: req.user.userId, username: req.user.username, role: serverRole(entry, req.user), ip: clientIp(req), serverId: entry.id, serverName: entry.name, instanceId, ok: false, error: String(error.message || error) });
       res.status(502).json({ error: String(error.message || error) });
     }
   });
@@ -1147,27 +2187,44 @@ function startServer() {
     if (!checkRate(`catalog:${req.user.userId}`, 60, 60 * 1000)) {
       return res.status(429).json({ error: 'Too many catalog requests. Wait a moment.' });
     }
-    const entry = findOwnedServer(req.query, req.user);
-    if (!entry) return res.status(404).json({ error: 'Server not found on your account.' });
+    const entry = findAccessibleServer(req.query, req.user);
+    if (!entry) return res.status(404).json({ error: 'Server not found on your account or a team you joined.' });
+    if (!can(entry, req.user, 'catalog')) {
+      return res.status(403).json({ error: 'Your role does not allow map browsing on this server.' });
+    }
+    const requestedInstanceId = String(req.query.instanceId || '').trim();
+    if (requestedInstanceId) {
+      if (!INSTANCE_ID_RE.test(requestedInstanceId)) {
+        return res.status(400).json({ error: 'Choose a valid managed server instance.' });
+      }
+      if (entry.connectionMode !== 'agent') {
+        return res.status(400).json({ error: 'Managed server instances require Agent mode.' });
+      }
+      if (!can(entry, req.user, 'instancesView')) {
+        return res.status(403).json({ error: 'Your role does not allow access to managed server instances.' });
+      }
+    }
     if (entry.connectionMode === 'direct' && !req.user.isAdmin) {
       return res.status(403).json({ error: 'Direct RCON is restricted to the panel administrator. Use Agent mode; it needs no port forwarding.' });
     }
-    const cached = catalogCache.get(entry.id);
+    const cacheKey = `${entry.id}:${requestedInstanceId || 'default'}`;
+    const cached = catalogCache.get(cacheKey);
     if (cached && Date.now() - cached.at < CATALOG_TTL_MS) return res.json(cached.data);
     try {
       let maps;
       let modes;
       if (entry.connectionMode === 'agent') {
+        const payload = requestedInstanceId ? { instanceId: requestedInstanceId } : {};
         [maps, modes] = await Promise.all([
-          sendAgentCommand(entry, 'maps', {}, 25000),
-          sendAgentCommand(entry, 'modes', {}, 25000),
+          sendAgentCommand(entry, 'maps', payload, 25000),
+          sendAgentCommand(entry, 'modes', payload, 25000),
         ]);
       } else {
         const rc = rcon.make(entry, { allowPrivate: req.user.isAdmin });
         [maps, modes] = await Promise.all([rc.maps(), rc.modes()]);
       }
       const data = { maps, modes };
-      catalogCache.set(entry.id, { at: Date.now(), data });
+      catalogCache.set(cacheKey, { at: Date.now(), data });
       res.json(data);
     } catch (error) {
       res.status(502).json({ error: String(error.message || error) });
@@ -1230,6 +2287,8 @@ function startServer() {
       serverId: entry.id,
       agentName: entry.agentName || 'OmniVault Agent',
       agentVersion: entry.agentVersion || 'unknown',
+      filesEnabled: !!entry.agentFilesEnabled,
+      instancesEnabled: !!entry.agentInstancesEnabled,
       connectedAt: Date.now(),
       lastSeen: Date.now(),
       pending: new Map(),
@@ -1239,6 +2298,8 @@ function startServer() {
     updateAgentMeta(entry.id, {
       agentName: live.agentName,
       agentVersion: live.agentVersion,
+      agentFilesEnabled: !!live.filesEnabled,
+      agentInstancesEnabled: !!live.instancesEnabled,
       agentLastSeen: new Date().toISOString(),
     });
     try {
@@ -1258,9 +2319,13 @@ function startServer() {
       if (message.type === 'hello') {
         if (message.agentName) live.agentName = String(message.agentName).slice(0, 80);
         if (message.agentVersion) live.agentVersion = String(message.agentVersion).slice(0, 32);
+        if (typeof message.filesEnabled === 'boolean') live.filesEnabled = message.filesEnabled;
+        if (typeof message.instancesEnabled === 'boolean') live.instancesEnabled = message.instancesEnabled;
         updateAgentMeta(entry.id, {
           agentName: live.agentName,
           agentVersion: live.agentVersion,
+          agentFilesEnabled: !!live.filesEnabled,
+          agentInstancesEnabled: !!live.instancesEnabled,
           agentLastSeen: new Date().toISOString(),
         });
         return;

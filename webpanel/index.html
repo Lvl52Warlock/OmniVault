@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>OmniVault Control Room</title>
-  <link rel="stylesheet" href="/webpanel/webpanel.css">
+  <link rel="stylesheet" href="/webpanel/webpanel.css?v=1.4.5">
 </head>
 <body>
   <header class="topbar">
@@ -19,6 +19,7 @@
     <div class="topbar-right">
       <span class="local-badge"><span class="dot"></span>SERVER CONSOLE</span>
       <span id="last-updated" class="muted">Connecting…</span>
+      <button id="desktop-update" class="button button-quiet desktop-update" type="button" hidden>Check for updates</button>
       <button id="push-agent-update" class="button button-quiet" type="button" hidden>Push agent update</button>
       <button id="refresh" class="button button-secondary" type="button">Refresh</button>
       <div id="user-info" class="user-chip" hidden>
@@ -33,9 +34,10 @@
       <div>
         <p class="eyebrow">YOUR SERVERS</p>
         <h1>Control room</h1>
-        <p class="muted">Manage only the Reclaimer servers attached to your account.</p>
+        <p class="muted">Manage your Reclaimer servers, or join a server team with an access code.</p>
       </div>
       <div class="hero-actions">
+        <button id="join-team" class="button button-secondary" type="button">Join a server team</button>
         <button id="add-server" class="button button-primary" type="button">Add server</button>
       </div>
     </div>
@@ -44,7 +46,7 @@
       <div class="guide-copy">
         <p class="eyebrow">START HERE</p>
         <h2 id="guide-title">Connect a server in three steps</h2>
-        <p class="muted">Agent mode is the only connection option for public accounts. It needs no port forwarding.</p>
+        <p class="muted">Agent mode is the only connection option for public accounts. It needs no port forwarding. Invite moderators and developers without sharing your account.</p>
       </div>
       <ol class="guide-steps">
         <li>
@@ -73,8 +75,11 @@
     <section id="empty-state" class="empty-state" hidden>
       <p class="eyebrow">NO SERVERS YET</p>
       <h2>Connect your first server</h2>
-      <p class="muted">Add a Project Reclaimer dedicated server. Agent mode needs no port forwarding and is the only option for public accounts. Servers are private to your account.</p>
-      <button id="empty-add-server" class="button button-primary" type="button">Add your first server</button>
+      <p class="muted">Add a Project Reclaimer dedicated server. Agent mode needs no port forwarding and is the only option for public accounts. Servers are private to you and the people you invite.</p>
+      <div class="hero-actions" style="justify-content:center;">
+        <button id="empty-add-server" class="button button-primary" type="button">Add your first server</button>
+        <button id="empty-join-team" class="button button-secondary" type="button">Join a server team</button>
+      </div>
     </section>
 
     <section id="server-workspace" class="workspace" hidden>
@@ -84,14 +89,21 @@
             <div>
               <p class="eyebrow">SELECTED SERVER</p>
               <h2 id="selected-name">No server selected</h2>
+              <p id="selected-role" class="role-badge" hidden></p>
             </div>
             <label class="server-picker" for="server-select">Server
               <select id="server-select"></select>
             </label>
+            <label id="instance-picker" class="server-picker" for="instance-select" hidden>Instance
+              <select id="instance-select"><option value="">Default RCON</option></select>
+            </label>
           </div>
 
           <div class="server-card-actions">
-            <button id="agent-setup" class="button button-secondary" type="button" hidden>Agent setup</button>
+            <button id="server-instances" class="button button-secondary" type="button" hidden>Server instances</button>
+            <button id="server-files" class="button button-secondary" type="button" hidden>Server files</button>
+            <button id="manage-access" class="button button-secondary" type="button" hidden>Manage access</button>
+            <button id="agent-setup" class="button button-quiet" type="button" hidden>Agent setup</button>
             <button id="edit-server" class="button button-quiet" type="button">Edit</button>
             <button id="delete-server" class="button button-danger" type="button">Remove</button>
           </div>
@@ -107,37 +119,40 @@
 
         <section class="card">
           <p class="eyebrow">RCON ACTIONS</p>
-          <form id="say-form" class="action-form">
-            <label class="field">Broadcast message
-              <input type="text" name="message" maxlength="500" placeholder="Say something to everyone…" autocomplete="off">
-            </label>
-            <button class="button button-primary" type="submit">Send message</button>
-          </form>
-
-          <hr class="rule">
-
-          <form id="map-form" class="action-form">
-            <div class="form-row">
-              <label class="field">Map
-                <select name="map">
-                  <option value="">Select map…</option>
-                </select>
+          <div class="permission-block" data-permission="say">
+            <form id="say-form" class="action-form">
+              <label class="field">Broadcast message
+                <input type="text" name="message" maxlength="500" placeholder="Say something to everyone…" autocomplete="off">
               </label>
-              <label class="field">Mode
-                <select name="mode">
-                  <option value="">Select mode…</option>
-                </select>
-              </label>
-            </div>
-            <div class="button-row">
-              <button class="button button-primary" type="submit" name="action" value="load">Load map</button>
-              <button class="button button-secondary" type="submit" name="action" value="nextmap">Set next map</button>
-            </div>
-          </form>
+              <button class="button button-primary" type="submit">Send message</button>
+            </form>
+          </div>
 
-          <div class="button-row end-buttons">
-            <button id="btn-endround" class="button button-danger" type="button">End round</button>
-            <button id="btn-endgame" class="button button-danger" type="button">End game</button>
+          <div class="permission-block" data-permission="map">
+            <hr class="rule">
+            <form id="map-form" class="action-form">
+              <div class="form-row">
+                <label class="field">Map
+                  <select name="map">
+                    <option value="">Select map…</option>
+                  </select>
+                </label>
+                <label class="field">Mode
+                  <select name="mode">
+                    <option value="">Select mode…</option>
+                  </select>
+                </label>
+              </div>
+              <div class="button-row">
+                <button class="button button-primary" type="submit" name="action" value="load">Load map</button>
+                <button class="button button-secondary" type="submit" name="action" value="nextmap">Set next map</button>
+              </div>
+            </form>
+          </div>
+
+          <div class="button-row end-buttons permission-block" data-permission="endRound">
+            <button id="btn-endround" class="button button-danger" type="button" data-permission="endRound">End round</button>
+            <button id="btn-endgame" class="button button-danger" type="button" data-permission="endGame">End game</button>
           </div>
         </section>
       </div>
@@ -150,6 +165,7 @@
             <div><dt>Host</dt><dd id="detail-host">—</dd></div>
             <div><dt>RCON port</dt><dd id="detail-port">—</dd></div>
             <div><dt>Agent</dt><dd id="detail-agent">—</dd></div>
+            <div><dt>Your role</dt><dd id="detail-role">—</dd></div>
             <div><dt>Added</dt><dd id="detail-created">—</dd></div>
           </dl>
           <p id="connection-hint" class="hint">The RCON password is stored on the panel server and is never sent back to your browser.</p>
@@ -157,55 +173,60 @@
 
         <section class="card">
           <p class="eyebrow">MODERATION</p>
-          <form id="kick-form" class="action-form">
-            <div class="form-row">
-              <label class="field">Player
-                <input type="text" name="player" maxlength="80" placeholder="Player name or ID" autocomplete="off">
-              </label>
+          <div class="permission-block" data-permission="kick">
+            <form id="kick-form" class="action-form">
+              <div class="form-row">
+                <label class="field">Player
+                  <input type="text" name="player" maxlength="80" placeholder="Player name or ID" autocomplete="off">
+                </label>
+                <label class="field">Reason (optional)
+                  <input type="text" name="reason" maxlength="160" placeholder="Reason" autocomplete="off">
+                </label>
+              </div>
+              <button class="button button-secondary" type="submit">Kick player</button>
+            </form>
+          </div>
+
+          <div class="permission-block" data-permission="ban">
+            <hr class="rule">
+            <form id="ban-form" class="action-form">
+              <div class="form-row">
+                <label class="field">Player
+                  <input type="text" name="player" maxlength="80" placeholder="Player name or ID" autocomplete="off">
+                </label>
+                <label class="field">Duration
+                  <select name="time">
+                    <option value="none">Permanent</option>
+                    <option value="30m">30 minutes</option>
+                    <option value="1h">1 hour</option>
+                    <option value="12h">12 hours</option>
+                    <option value="1d">1 day</option>
+                    <option value="7d">7 days</option>
+                  </select>
+                </label>
+              </div>
               <label class="field">Reason (optional)
                 <input type="text" name="reason" maxlength="160" placeholder="Reason" autocomplete="off">
               </label>
-            </div>
-            <button class="button button-secondary" type="submit">Kick player</button>
-          </form>
+              <button class="button button-danger" type="submit">Ban player</button>
+            </form>
+          </div>
 
-          <hr class="rule">
-
-          <form id="ban-form" class="action-form">
-            <div class="form-row">
-              <label class="field">Player
-                <input type="text" name="player" maxlength="80" placeholder="Player name or ID" autocomplete="off">
+          <div class="permission-block" data-permission="unban">
+            <hr class="rule">
+            <form id="unban-form" class="action-form">
+              <label class="field">Player or address to unban
+                <input type="text" name="target" maxlength="160" placeholder="Player name, IP or ID" autocomplete="off">
               </label>
-              <label class="field">Duration
-                <select name="time">
-                  <option value="none">Permanent</option>
-                  <option value="30m">30 minutes</option>
-                  <option value="1h">1 hour</option>
-                  <option value="12h">12 hours</option>
-                  <option value="1d">1 day</option>
-                  <option value="7d">7 days</option>
-                </select>
-              </label>
-            </div>
-            <label class="field">Reason (optional)
-              <input type="text" name="reason" maxlength="160" placeholder="Reason" autocomplete="off">
-            </label>
-            <button class="button button-danger" type="submit">Ban player</button>
-          </form>
-
-          <hr class="rule">
-
-          <form id="unban-form" class="action-form">
-            <label class="field">Player or address to unban
-              <input type="text" name="target" maxlength="160" placeholder="Player name, IP or ID" autocomplete="off">
-            </label>
-            <button class="button button-secondary" type="submit">Unban</button>
-          </form>
+              <button class="button button-secondary" type="submit">Unban</button>
+            </form>
+          </div>
+          <p id="moderation-empty" class="hint" hidden>You do not have moderation actions on this server.</p>
         </section>
 
         <section class="notice">
           <span class="notice-icon">i</span>
-          <p><strong>Private by account.</strong> Your server list, status and actions are only available to your signed-in account. Other users cannot see or control your servers.</p>
+          <p><strong>Private or shared by invitation.</strong> Only you and the people you invite with a single-use access code can see this server. Moderators can kick and end rounds or games; developers can manage maps and server files. Only the owner can delete files or change access.</p>
         </section>
       </div>
     </section>
@@ -304,6 +325,8 @@
         <li><strong>Put it in a folder</strong> such as <b>C:\OmniVaultAgent</b>. No Node.js install or unzipping is needed.</li>
         <li><strong>Open PowerShell in that folder</strong> and run the setup command shown here. It tests the local RCON connection, pairs the agent, and prompts for the RCON password. Add an Agent server first to get the code and command.</li>
         <li><strong>Keep the agent running</strong> by double-clicking <b>OmniVaultAgent.exe</b> after setup. Keep its window open.</li>
+        <li><strong>Optional: enable Server files</strong> For a new agent, add <b>--files-dir "C:\Path\To\Your\Server\Content"</b> to setup. If it is already paired, run <b>--set-files-dir "C:\Path\To\Your\Server\Content"</b> and restart the agent. Only the owner can delete files.</li>
+        <li><strong>Optional: let the panel create Reclaimer servers</strong> Add <b>--instances-dir "C:\OmniVault\instances" --reclaimer-exe "C:\Path\To\project-reclaimer-dedicated.exe" --server-root "C:\Path\To\Halo Server"</b>. The server root must contain <b>game\</b> and <b>content\</b>. If it is already paired, use the <b>--set-*</b> equivalents and restart the agent.</li>
       </ol>
 
       <div id="agent-command-block" hidden>
@@ -312,7 +335,8 @@
           <code id="agent-command"></code>
           <button id="agent-copy-command" class="button button-secondary" type="button">Copy</button>
         </div>
-        <p class="hint">If your RCON is not on port 49176, change <b>-RconPort</b> in the command. The RCON password is never sent to the panel.</p>
+        <p class="hint">If your RCON is not on port 49176, change <b>--rcon-port</b> in the command. The RCON password is never sent to the panel.</p>
+        <p class="hint">Optional: add <b>--files-dir "C:\Path\To\Your\Server\Content"</b> to the command to enable the Server files tab. The agent only accesses files inside that folder.</p>
       </div>
 
       <p id="agent-live-status" class="agent-live-status">Waiting for the agent to connect…</p>
@@ -326,6 +350,198 @@
     </form>
   </dialog>
 
-  <script src="/webpanel/webpanel.js"></script>
+  <dialog id="join-team-modal" class="modal" aria-labelledby="join-team-title">
+    <form id="join-team-form" class="stack-form" style="max-width:440px;">
+      <span class="brand-mark auth-mark" style="width:48px; height:48px; font-size:24px;">OV</span>
+      <p class="eyebrow" style="letter-spacing:.12em;">SERVER TEAM</p>
+      <h1 id="join-team-title" style="margin-top:10px;">Join a server team</h1>
+      <p class="muted" style="margin-top:8px;">Enter the single-use access code from the server owner. Your role decides which controls you can use.</p>
+      <label class="field">Access code
+        <input id="join-team-code" name="code" required maxlength="12" autocomplete="off" placeholder="e.g. 1A2B-3C4D" spellcheck="false">
+      </label>
+      <p id="join-team-error" class="auth-error" role="alert" hidden></p>
+      <div class="button-row">
+        <button id="join-team-cancel" class="button button-quiet" type="button">Cancel</button>
+        <button id="join-team-submit" class="button button-primary" type="submit">Join team</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="access-modal" class="modal" aria-labelledby="access-title">
+    <form id="access-form" class="stack-form access-form">
+      <p class="eyebrow" style="letter-spacing:.12em;">TEAM ACCESS</p>
+      <h1 id="access-title" style="margin-top:0;">Manage server team</h1>
+      <p id="access-description" class="muted">Invite people without sharing your password. Each code works once and expires after 24 hours.</p>
+
+      <div class="access-section">
+        <p class="eyebrow">CURRENT TEAM</p>
+        <div id="access-members" class="member-list"></div>
+      </div>
+
+      <div class="access-section roles-section">
+        <div class="roles-heading">
+          <p class="eyebrow">ROLES &amp; PERMISSIONS</p>
+          <button id="manage-roles" class="button button-quiet" type="button">New role</button>
+        </div>
+        <div id="access-roles" class="role-list"></div>
+        <p class="hint">Create a role, tick exactly what it can do, then assign it to a team member. Delete files and delete instances stay owner-only.</p>
+      </div>
+
+      <div class="access-section invite-card">
+        <p class="eyebrow">INVITE SOMEONE</p>
+        <div class="invite-row">
+          <label class="field">Role
+            <select id="invite-role">
+              <option value="moderator">Moderator — kick, end round, end game</option>
+              <option value="developer">Developer — maps, files, and server instances</option>
+            </select>
+          </label>
+          <button id="create-invite" class="button button-primary" type="button">Create access code</button>
+        </div>
+        <div id="invite-result" class="invite-result" hidden>
+          <div class="agent-code-row">
+            <strong id="invite-code" class="agent-code team-code">----</strong>
+            <button id="copy-invite" class="button button-secondary" type="button">Copy code</button>
+          </div>
+          <p id="invite-expiry" class="hint"></p>
+        </div>
+        <p id="invite-active" class="hint" hidden></p>
+      </div>
+
+      <p id="access-error" class="auth-error" role="alert" hidden></p>
+      <div class="button-row">
+        <button id="access-close" class="button button-primary" type="button">Close</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="files-modal" class="modal files-modal" aria-labelledby="files-title">
+    <form id="files-form" class="stack-form files-form">
+      <div class="files-heading">
+        <div>
+          <p class="eyebrow" style="letter-spacing:.12em;">SERVER FILES</p>
+          <h1 id="files-title" style="margin-top:0;">Maps and playlists</h1>
+          <p id="files-server-name" class="muted"></p>
+        </div>
+        <button id="files-close" class="button button-quiet" type="button">Close</button>
+      </div>
+
+      <div class="files-toolbar">
+        <button id="files-up" class="button button-quiet" type="button" hidden>Up one folder</button>
+        <button id="files-upload-button" class="button button-secondary" type="button">Upload files</button>
+        <input id="files-upload-input" type="file" multiple hidden>
+        <button id="files-new-folder" class="button button-quiet" type="button">New folder</button>
+        <button id="files-refresh" class="button button-quiet" type="button">Refresh</button>
+        <span id="files-path" class="files-path">/</span>
+      </div>
+
+      <p id="files-hint" class="hint">Only server-content file types are accepted. Uploads overwrite files with the same name.</p>
+      <div id="file-list" class="file-list" aria-live="polite"></div>
+      <p id="files-error" class="auth-error" role="alert" hidden></p>
+    </form>
+  </dialog>
+
+  <dialog id="role-modal" class="modal" aria-labelledby="role-modal-title">
+    <form id="role-form" class="stack-form role-form">
+      <p class="eyebrow" style="letter-spacing:.12em;">CUSTOM ROLE</p>
+      <h1 id="role-modal-title">Create a role</h1>
+      <p class="muted">Tick the actions this role may perform on this server. The owner always keeps every permission.</p>
+      <label class="field">Role name
+        <input id="role-name" maxlength="32" required placeholder="e.g. Event Manager">
+      </label>
+      <div id="role-permissions" class="permission-grid"></div>
+      <p id="role-locked-note" class="hint">Delete server files and delete managed instances are owner-only. Some choices automatically enable View server instances, Read server files, or Browse maps and modes.</p>
+      <p id="role-error" class="auth-error" role="alert" hidden></p>
+      <div class="button-row">
+        <button id="role-delete" class="button button-danger" type="button" hidden>Delete role</button>
+        <button id="role-cancel" class="button button-quiet" type="button">Cancel</button>
+        <button id="role-save" class="button button-primary" type="submit">Save role</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="instances-modal" class="modal instances-modal" aria-labelledby="instances-title">
+    <form id="instances-form" class="stack-form instances-form">
+      <div class="files-heading">
+        <div>
+          <p class="eyebrow" style="letter-spacing:.12em;">MANAGED SERVERS</p>
+          <h1 id="instances-title">Reclaimer instances</h1>
+          <p id="instances-server-name" class="muted"></p>
+        </div>
+        <button id="instances-close" class="button button-quiet" type="button">Close</button>
+      </div>
+
+      <div id="instances-setup" class="instance-setup" hidden>
+        <p><strong>One-time agent setup.</strong> Stop the agent on the game-server PC, run this command with your real paths, then start the agent again. The panel never receives the RCON password or files outside these folders.</p>
+        <div class="code-block">
+          <code id="instances-setup-command">.\OmniVaultAgent.exe --set-instances-dir "C:\OmniVault\instances" --set-reclaimer-exe "C:\Path\To\project-reclaimer-dedicated.exe" --set-server-root "C:\Path\To\Halo Server"</code>
+          <button id="instances-copy-setup" class="button button-secondary" type="button">Copy</button>
+        </div>
+        <p class="hint">The instances folder can be empty. The server root must be the Reclaimer folder that contains <b>game\</b> and <b>content\</b> (usually the folder holding the .exe). Restart the agent after saving.</p>
+      </div>
+
+      <div class="instance-toolbar">
+        <button id="instance-new" class="button button-primary" type="button">New server instance</button>
+        <button id="instances-refresh" class="button button-quiet" type="button">Refresh</button>
+        <span id="instances-count" class="muted"></span>
+      </div>
+
+      <div id="instance-list" class="instance-list" aria-live="polite"></div>
+
+      <section id="instance-editor" class="instance-editor" hidden>
+        <div class="instance-editor-heading">
+          <div>
+            <p class="eyebrow">PLAYLIST &amp; PROCESS</p>
+            <h2 id="instance-editor-title">New Reclaimer server</h2>
+          </div>
+          <button id="instance-cancel-edit" class="button button-quiet" type="button">Cancel</button>
+        </div>
+        <div class="form-row">
+          <label class="field">Server name
+            <input id="instance-name" maxlength="80" placeholder="e.g. Friday Night Customs">
+          </label>
+          <label class="field">Game port
+            <input id="instance-port" type="number" min="1024" max="65535" placeholder="49200">
+          </label>
+        </div>
+        <div class="form-row">
+          <label class="field">Max players
+            <input id="instance-max-players" type="number" min="1" max="127" value="16">
+          </label>
+          <label class="field">Vote time (seconds)
+            <input id="instance-vote-seconds" type="number" min="5" max="300" value="20">
+          </label>
+        </div>
+        <label class="field">Playlist name
+          <input id="instance-playlist-name" maxlength="80" placeholder="e.g. Friday Customs">
+        </label>
+        <div class="playlist-heading">
+          <p class="eyebrow">GAMES IN THE PLAYLIST</p>
+          <button id="instance-add-game" class="button button-quiet" type="button">Add game</button>
+        </div>
+        <div id="instance-games" class="instance-games"></div>
+        <p class="hint">A Reclaimer playlist needs at least three games; the agent writes the playlist file for you. Map and game names come from the selected server's RCON catalog when available, and you can also type a Reclaimer name manually.</p>
+        <label class="check-row"><input id="instance-start-after" type="checkbox" checked> Start this instance after saving</label>
+        <p id="instance-editor-error" class="auth-error" role="alert" hidden></p>
+        <div class="button-row">
+          <button id="instance-save" class="button button-primary" type="submit">Create server</button>
+        </div>
+      </section>
+
+      <section id="instance-log-panel" class="instance-log-panel" hidden>
+        <div class="instance-editor-heading">
+          <div><p class="eyebrow">SERVER LOG</p><h2 id="instance-log-title">Instance log</h2></div>
+          <button id="instance-log-close" class="button button-quiet" type="button">Close log</button>
+        </div>
+        <pre id="instance-log-text" class="instance-log-text"></pre>
+      </section>
+
+      <datalist id="instance-map-options"></datalist>
+      <datalist id="instance-mode-options"></datalist>
+      <p id="instances-error" class="auth-error" role="alert" hidden></p>
+    </form>
+  </dialog>
+
+  <script src="/webpanel/webpanel.js?v=1.4.5"></script>
 </body>
 </html>

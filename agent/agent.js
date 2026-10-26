@@ -8,6 +8,7 @@ const readline = require('readline');
 const { spawn, spawnSync } = require('child_process');
 const WebSocket = require('ws');
 const rcon = require('./rcon');
+const instances = require('./instances');
 const packageInfo = require('./package.json');
 
 // pkg snapshots the application under a virtual directory. Configuration and
@@ -19,8 +20,17 @@ const VERSION = packageInfo.version;
 const DEFAULT_CONFIG = path.join(RUNTIME_DIR, 'agent-config.json');
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const MAX_RESULT_CHARS = 256 * 1024;
+const MAX_FILE_BYTES = 32 * 1024 * 1024;
+const MAX_FILE_CHUNK_BYTES = 1024 * 1024;
+const UPLOAD_TTL_MS = 30 * 60 * 1000;
+const DEFAULT_FILE_EXTENSIONS = [
+  '.map', '.gametype', '.gt', '.playlist', '.rotation', '.pdl',
+  '.ini', '.json', '.txt', '.xml', '.cfg', '.yaml', '.yml', '.toml',
+  '.csv', '.md', '.zip', '.pak', '.umap', '.uasset',
+];
+const fileUploads = new Map();
 const UPDATE_FILES = new Set([
-  'agent.js', 'rcon.js', 'package.json', 'update-public.pem',
+  'agent.js', 'rcon.js', 'instances.js', 'package.json', 'update-public.pem',
   'start-agent.ps1', 'start-agent.cmd', 'README.txt',
 ]);
 const args = process.argv.slice(2);
@@ -43,12 +53,17 @@ function argValue(...names) {
 const configPath = argValue('--config') || process.env.OMNIVAULT_AGENT_CONFIG || DEFAULT_CONFIG;
 const testOnly = hasArg('--test');
 const forceSetup = hasArg('--setup');
+const setFilesDirRequested = hasArg('--set-files-dir');
+const setInstancesDirRequested = hasArg('--set-instances-dir');
+const setReclaimerExeRequested = hasArg('--set-reclaimer-exe');
+const setServerRootRequested = hasArg('--set-server-root') || hasArg('--set-mcc-path');
 const skipRconTest = hasArg('--skip-rcon-test');
 const showHelp = hasArg('--help') || hasArg('-h');
 const showVersion = hasArg('--version');
 const setupRequested = forceSetup || [
   '--panel', '--panel-url', '--pair', '--pairing-code', '--rcon-host',
-  '--rcon-port', '--rcon-password', '--name',
+  '--rcon-port', '--rcon-password', '--name', '--files-dir',
+  '--instances-dir', '--reclaimer-exe', '--server-root', '--mcc-path',
 ].some(hasArg);
 
 function log(message) {
@@ -70,6 +85,14 @@ function usage() {
   console.log('  --rcon-port <port>     Local RCON port (default 49176).');
   console.log('  --rcon-password <pw>   RCON password; omit it to be prompted privately.');
   console.log('  --name <name>          Name shown in the panel (default: this PC).');
+  console.log('  --files-dir <path>     Optional server files folder for maps and playlists.');
+  console.log('  --set-files-dir <path> Enable or change the server files folder without re-pairing.');
+  console.log('  --instances-dir <path> Folder where the panel may create managed Reclaimer servers.');
+  console.log('  --reclaimer-exe <path> Project Reclaimer dedicated executable for managed servers.');
+  console.log('  --server-root <path>   Reclaimer folder containing game/ and content/ (default: folder of the .exe).');
+  console.log('  --set-instances-dir <path> Change the managed-instances folder and exit.');
+  console.log('  --set-reclaimer-exe <path> Change the Reclaimer executable and exit.');
+  console.log('  --set-server-root <path> Change the Reclaimer server folder and exit.');
   console.log('  --setup                Re-run setup even if agent-config.json exists.');
   console.log('  --skip-rcon-test       Save the configuration without testing RCON first.');
   console.log('  --test                 Test the saved RCON configuration and exit.');
@@ -171,6 +194,80 @@ function restrictConfigPermissions(file) {
   } catch {}
 }
 
+function normalizeFilesRoot(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  let resolved;
+  try {
+    resolved = fs.realpathSync(path.resolve(text));
+  } catch (error) {
+    throw new Error(`The server files folder could not be opened: ${error.message}`);
+  }
+  if (!fs.statSync(resolved).isDirectory()) {
+    throw new Error('The server files folder must be a directory.');
+  }
+  return resolved;
+}
+
+function normalizeInstancesRoot(value, create = false) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  const target = path.resolve(text);
+  if (create) {
+    try {
+      fs.mkdirSync(target, { recursive: true });
+    } catch (error) {
+      throw new Error(`The managed-instances folder could not be created: ${error.message}`);
+    }
+  }
+  let resolved;
+  try {
+    resolved = fs.realpathSync(target);
+  } catch (error) {
+    throw new Error(`The managed-instances folder could not be opened: ${error.message}`);
+  }
+  if (!fs.statSync(resolved).isDirectory()) {
+    throw new Error('The managed-instances path must be a directory.');
+  }
+  return resolved;
+}
+
+function normalizeReclaimerExe(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  let resolved;
+  try {
+    resolved = fs.realpathSync(path.resolve(text));
+  } catch (error) {
+    throw new Error(`The Project Reclaimer executable could not be opened: ${error.message}`);
+  }
+  if (!fs.statSync(resolved).isFile()) {
+    throw new Error('The Project Reclaimer path must be a file.');
+  }
+  if (!/\.(exe|js)$/i.test(resolved)) {
+    throw new Error('The Project Reclaimer executable must be an .exe file.');
+  }
+  return resolved;
+}
+
+function normalizeServerRoot(value, exePath) {
+  const text = String(value || '').trim() || path.dirname(exePath);
+  let resolved;
+  try {
+    resolved = fs.realpathSync(path.resolve(text));
+  } catch (error) {
+    throw new Error(`The Reclaimer server folder could not be opened: ${error.message}`);
+  }
+  if (!fs.statSync(resolved).isDirectory()) {
+    throw new Error('The Reclaimer server folder must be a directory.');
+  }
+  const gameFolder = path.join(resolved, 'game');
+  if (!fs.existsSync(gameFolder) || !fs.statSync(gameFolder).isDirectory()) {
+    throw new Error(`The Reclaimer server folder must contain the game folder and content folder used by Project Reclaimer (looked in ${resolved}).`);
+  }
+  return resolved;
+}
+
 async function runSetup() {
   let panelUrl = String(argValue('--panel', '--panel-url') || process.env.OMNIVAULT_PANEL_URL || '').trim();
   let pairingCodeInput = String(argValue('--pair', '--pairing-code') || '').trim();
@@ -178,6 +275,12 @@ async function runSetup() {
   let rconPortInput = String(argValue('--rcon-port') || '49176').trim();
   let agentName = String(argValue('--name') || os.hostname()).trim().slice(0, 80) || os.hostname();
   let rconPassword = String(argValue('--rcon-password') || process.env.OMNIVAULT_RCON_PASSWORD || '');
+  let existingConfig = {};
+  try { existingConfig = JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch {}
+  let filesRoot = String(argValue('--files-dir') || process.env.OMNIVAULT_FILES_DIR || existingConfig.filesRoot || '').trim();
+  let instancesRoot = String(argValue('--instances-dir') || process.env.OMNIVAULT_INSTANCES_DIR || existingConfig.instancesRoot || '').trim();
+  let reclaimerExe = String(argValue('--reclaimer-exe') || process.env.OMNIVAULT_RECLAIMER_EXE || existingConfig.reclaimerExe || '').trim();
+  let serverRoot = String(argValue('--server-root', '--mcc-path') || process.env.OMNIVAULT_SERVER_ROOT || existingConfig.serverRoot || existingConfig.mccPath || '').trim();
 
   const needsWizard = !panelUrl || !pairingCodeInput;
   if (needsWizard && !process.stdin.isTTY) {
@@ -203,6 +306,18 @@ async function runSetup() {
       if (portAnswer) rconPortInput = portAnswer;
       const nameAnswer = (await prompt.ask(`Agent name [${agentName}]: `)).trim();
       if (nameAnswer) agentName = nameAnswer.slice(0, 80);
+      const filesAnswer = (await prompt.ask('Server files folder for maps/playlists (optional, Enter to skip): ')).trim();
+      if (filesAnswer) filesRoot = filesAnswer;
+      const instancesAnswer = (await prompt.ask('Managed instances folder for panel-created servers (optional, Enter to skip): ')).trim();
+      if (instancesAnswer) instancesRoot = instancesAnswer;
+      if (instancesRoot) {
+        const exeAnswer = (await prompt.ask('Project Reclaimer dedicated .exe path: ')).trim();
+        if (exeAnswer) reclaimerExe = exeAnswer;
+        if (reclaimerExe) {
+          const rootAnswer = (await prompt.ask(`Reclaimer server folder containing game/ and content/ [${path.dirname(reclaimerExe)}]: `)).trim();
+          if (rootAnswer) serverRoot = rootAnswer;
+        }
+      }
     } finally {
       prompt.close();
     }
@@ -218,6 +333,17 @@ async function runSetup() {
     throw new Error('The RCON port must be between 1 and 65535.');
   }
   if (!rconHost) throw new Error('The RCON host is required.');
+  filesRoot = normalizeFilesRoot(filesRoot);
+  if (!!instancesRoot !== !!reclaimerExe) {
+    throw new Error('Managed server instances need both --instances-dir and --reclaimer-exe.');
+  }
+  if (instancesRoot) {
+    instancesRoot = normalizeInstancesRoot(instancesRoot, true);
+    reclaimerExe = normalizeReclaimerExe(reclaimerExe);
+    serverRoot = normalizeServerRoot(serverRoot, reclaimerExe);
+  } else if (serverRoot) {
+    throw new Error('Pass --instances-dir and --reclaimer-exe when setting --server-root.');
+  }
 
   if (!rconPassword) {
     rconPassword = await promptHidden(`RCON password for ${rconHost}:${rconPort}: `);
@@ -260,6 +386,12 @@ async function runSetup() {
     agentName,
     rcon: { host: rconHost, port: rconPort, password: rconPassword },
   };
+  if (filesRoot) config.filesRoot = filesRoot;
+  if (instancesRoot) {
+    config.instancesRoot = instancesRoot;
+    config.reclaimerExe = reclaimerExe;
+    config.serverRoot = serverRoot;
+  }
   try {
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2), { encoding: 'utf8', mode: 0o600 });
   } catch (error) {
@@ -291,6 +423,9 @@ function loadConfig() {
   }
   if (panel.protocol === 'http:' && !['127.0.0.1', 'localhost', '::1'].includes(panel.hostname)) {
     throw new Error('Use an HTTPS panel URL outside localhost so the agent token is not sent in clear text.');
+  }
+  if (!!config.instancesRoot !== !!config.reclaimerExe) {
+    throw new Error('The agent instance configuration is incomplete. Run setup with both --instances-dir and --reclaimer-exe.');
   }
   return config;
 }
@@ -629,9 +764,262 @@ async function maybeUpdate(config, reason) {
   }
 }
 
+// ---------- server files ----------
+function allowedFileExtensions(config) {
+  const values = Array.isArray(config.allowedFileExtensions) && config.allowedFileExtensions.length
+    ? config.allowedFileExtensions
+    : DEFAULT_FILE_EXTENSIONS;
+  return new Set(values.map((value) => {
+    const extension = String(value || '').trim().toLowerCase();
+    if (!extension) return '';
+    return extension.startsWith('.') ? extension : `.${extension}`;
+  }).filter(Boolean));
+}
+function normalizeRelativePath(value, allowEmpty = false) {
+  const raw = String(value == null ? '' : value).replace(/\\/g, '/').trim();
+  if (!raw) {
+    if (allowEmpty) return '';
+    throw new Error('A file path is required.');
+  }
+  if (raw.startsWith('/') || /^[A-Za-z]:/.test(raw) || raw.includes('\u0000')) {
+    throw new Error('Use a path relative to the configured server files folder.');
+  }
+  const parts = raw.split('/').filter((part) => part && part !== '.');
+  if (parts.some((part) => part === '..' || part.startsWith('.omnivault-'))) {
+    throw new Error('The file path cannot leave the server files folder.');
+  }
+  if (!parts.length && !allowEmpty) throw new Error('A file path is required.');
+  return parts.join('/');
+}
+function insideRoot(root, target) {
+  const relative = path.relative(root, target);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+function configuredFilesRoot(config) {
+  const configured = String(config.filesRoot || '').trim();
+  if (!configured) {
+    throw new Error('The server files manager is not configured. Re-run setup with --files-dir pointing at your server content folder.');
+  }
+  let root;
+  try { root = fs.realpathSync(configured); } catch { throw new Error('The configured server files folder is unavailable.'); }
+  if (!fs.statSync(root).isDirectory()) throw new Error('The configured server files folder is not a directory.');
+  return root;
+}
+function resolveFileTarget(config, value, allowEmpty = false) {
+  const relative = normalizeRelativePath(value, allowEmpty);
+  const root = configuredFilesRoot(config);
+  const target = path.resolve(root, relative);
+  if (!insideRoot(root, target)) throw new Error('The file path cannot leave the server files folder.');
+  let probe = target;
+  while (!fs.existsSync(probe)) {
+    const parent = path.dirname(probe);
+    if (parent === probe) break;
+    probe = parent;
+  }
+  let realProbe;
+  try { realProbe = fs.realpathSync(probe); } catch { throw new Error('The file path is unavailable.'); }
+  if (!insideRoot(root, realProbe)) throw new Error('The file path cannot leave the server files folder.');
+  return { root, target, relative };
+}
+function fileExtension(filePath) {
+  return path.extname(String(filePath || '')).toLowerCase();
+}
+function assertAllowedFile(config, filePath) {
+  if (!allowedFileExtensions(config).has(fileExtension(filePath))) {
+    throw new Error('That file type is not allowed in the server files manager.');
+  }
+}
+function fileInfo(config, target, name, stats) {
+  const type = stats.isDirectory() ? 'dir' : 'file';
+  return {
+    name,
+    type,
+    size: type === 'file' ? stats.size : 0,
+    modifiedAt: stats.mtime.toISOString(),
+    allowed: type === 'dir' || allowedFileExtensions(config).has(fileExtension(name)),
+  };
+}
+function listServerFiles(config, value) {
+  const { target, relative } = resolveFileTarget(config, value, true);
+  const stats = fs.statSync(target);
+  if (!stats.isDirectory()) throw new Error('That path is not a folder.');
+  const entries = [];
+  for (const entry of fs.readdirSync(target, { withFileTypes: true })) {
+    if (entry.name.startsWith('.omnivault-') || entry.isSymbolicLink()) continue;
+    try {
+      const itemStats = fs.statSync(path.join(target, entry.name));
+      entries.push(fileInfo(config, target, entry.name, itemStats));
+    } catch {}
+    if (entries.length >= 500) break;
+  }
+  entries.sort((left, right) => {
+    if (left.type !== right.type) return left.type === 'dir' ? -1 : 1;
+    return left.name.localeCompare(right.name, undefined, { sensitivity: 'base' });
+  });
+  return { configured: true, path: relative, entries };
+}
+function statServerFile(config, value) {
+  const { target, relative } = resolveFileTarget(config, value, false);
+  const stats = fs.statSync(target);
+  if (!stats.isFile()) throw new Error('That path is not a file.');
+  assertAllowedFile(config, relative);
+  return { path: relative, name: path.basename(target), size: stats.size, modifiedAt: stats.mtime.toISOString() };
+}
+function readServerFile(config, value, offset, length) {
+  const info = statServerFile(config, value);
+  const { target } = resolveFileTarget(config, value, false);
+  const start = Number(offset);
+  const amount = Number(length);
+  if (!Number.isInteger(start) || start < 0 || !Number.isInteger(amount) || amount < 1 || amount > MAX_FILE_CHUNK_BYTES) {
+    throw new Error('The requested file chunk is invalid.');
+  }
+  const buffer = Buffer.alloc(Math.min(amount, Math.max(0, info.size - start)));
+  const fd = fs.openSync(target, 'r');
+  let bytes = 0;
+  try { bytes = fs.readSync(fd, buffer, 0, buffer.length, start); } finally { fs.closeSync(fd); }
+  return {
+    path: info.path,
+    size: info.size,
+    offset: start,
+    data: buffer.subarray(0, bytes).toString('base64'),
+    eof: start + bytes >= info.size,
+  };
+}
+function pruneFileUploads() {
+  const now = Date.now();
+  for (const [id, upload] of fileUploads) {
+    if (upload.expiresAt > now) continue;
+    try { fs.closeSync(upload.fd); } catch {}
+    try { fs.rmSync(upload.temp, { force: true }); } catch {}
+    fileUploads.delete(id);
+  }
+}
+function beginFileUpload(config, value, size) {
+  pruneFileUploads();
+  if (fileUploads.size >= 5) throw new Error('Too many file uploads are in progress. Try again in a moment.');
+  const total = Number(size);
+  if (!Number.isInteger(total) || total < 1 || total > MAX_FILE_BYTES) {
+    throw new Error('The file size is invalid or larger than the 32 MB limit.');
+  }
+  const { root, target, relative } = resolveFileTarget(config, value, false);
+  assertAllowedFile(config, relative);
+  const parent = path.dirname(target);
+  const parentStats = fs.statSync(parent);
+  if (!parentStats.isDirectory()) throw new Error('The destination folder does not exist.');
+  if (fs.existsSync(target) && !fs.statSync(target).isFile()) throw new Error('The destination is not a file.');
+  const id = crypto.randomBytes(12).toString('hex');
+  const temp = path.join(parent, `.omnivault-upload-${id}.part`);
+  const fd = fs.openSync(temp, 'w');
+  fileUploads.set(id, { fd, root, temp, target, size: total, received: 0, expiresAt: Date.now() + UPLOAD_TTL_MS });
+  return { uploadId: id, path: relative, size: total };
+}
+function appendFileUpload(value, base64) {
+  pruneFileUploads();
+  const id = String(value || '');
+  const upload = fileUploads.get(id);
+  if (!upload) throw new Error('That upload is no longer active. Start the upload again.');
+  const data = Buffer.from(String(base64 || ''), 'base64');
+  if (!data.length) throw new Error('The upload chunk was empty.');
+  if (data.length > MAX_FILE_CHUNK_BYTES) throw new Error('The upload chunk was too large.');
+  if (upload.received + data.length > upload.size) throw new Error('The upload exceeded its declared size.');
+  fs.writeSync(upload.fd, data, 0, data.length);
+  upload.received += data.length;
+  upload.expiresAt = Date.now() + UPLOAD_TTL_MS;
+  return { uploadId: id, received: upload.received, size: upload.size };
+}
+function finishFileUpload(value) {
+  const id = String(value || '');
+  const upload = fileUploads.get(id);
+  if (!upload) throw new Error('That upload is no longer active. Start the upload again.');
+  try {
+    if (upload.received !== upload.size) throw new Error('The upload did not finish. Try again.');
+    fs.closeSync(upload.fd);
+    upload.fd = null;
+    try {
+      fs.renameSync(upload.temp, upload.target);
+    } catch {
+      fs.rmSync(upload.target, { force: true });
+      fs.renameSync(upload.temp, upload.target);
+    }
+    return { path: path.relative(upload.root, upload.target).replace(/\\/g, '/'), size: upload.size };
+  } finally {
+    fileUploads.delete(id);
+    if (upload.fd !== null) { try { fs.closeSync(upload.fd); } catch {} }
+    try { fs.rmSync(upload.temp, { force: true }); } catch {}
+  }
+}
+function abortFileUpload(value) {
+  const id = String(value || '');
+  const upload = fileUploads.get(id);
+  if (!upload) return { ok: true };
+  fileUploads.delete(id);
+  if (upload.fd !== null) { try { fs.closeSync(upload.fd); } catch {} }
+  try { fs.rmSync(upload.temp, { force: true }); } catch {}
+  return { ok: true };
+}
+function makeServerDirectory(config, value) {
+  const { target, relative } = resolveFileTarget(config, value, false);
+  if (fs.existsSync(target)) throw new Error('A file or folder with that name already exists.');
+  const parent = path.dirname(target);
+  if (!fs.statSync(parent).isDirectory()) throw new Error('The parent folder does not exist.');
+  fs.mkdirSync(target);
+  return { path: relative };
+}
+function renameServerFile(config, fromValue, toValue) {
+  const from = resolveFileTarget(config, fromValue, false);
+  const to = resolveFileTarget(config, toValue, false);
+  const stats = fs.statSync(from.target);
+  if (stats.isFile()) {
+    assertAllowedFile(config, from.relative);
+    assertAllowedFile(config, to.relative);
+  }
+  if (fs.existsSync(to.target)) throw new Error('A file or folder with that name already exists.');
+  if (!fs.statSync(path.dirname(to.target)).isDirectory()) throw new Error('The destination folder does not exist.');
+  fs.renameSync(from.target, to.target);
+  return { from: from.relative, to: to.relative };
+}
+function deleteServerFile(config, value) {
+  const { target, relative } = resolveFileTarget(config, value, false);
+  const stats = fs.lstatSync(target);
+  if (stats.isDirectory()) {
+    if (fs.readdirSync(target).length) throw new Error('The folder is not empty. Remove its contents first.');
+    fs.rmdirSync(target);
+  } else {
+    assertAllowedFile(config, relative);
+    fs.unlinkSync(target);
+  }
+  return { path: relative };
+}
+function executeFileCommand(config, action, payload = {}) {
+  if (action === 'files-list') return JSON.stringify(listServerFiles(config, payload.path));
+  if (action === 'files-stat') return JSON.stringify(statServerFile(config, payload.path));
+  if (action === 'files-read') return JSON.stringify(readServerFile(config, payload.path, payload.offset, payload.length));
+  if (action === 'files-upload-begin') return JSON.stringify(beginFileUpload(config, payload.path, payload.size));
+  if (action === 'files-upload-chunk') return JSON.stringify(appendFileUpload(payload.uploadId, payload.data));
+  if (action === 'files-upload-end') return JSON.stringify(finishFileUpload(payload.uploadId));
+  if (action === 'files-upload-abort') return JSON.stringify(abortFileUpload(payload.uploadId));
+  if (action === 'files-mkdir') return JSON.stringify(makeServerDirectory(config, payload.path));
+  if (action === 'files-rename') return JSON.stringify(renameServerFile(config, payload.from, payload.to));
+  if (action === 'files-delete') return JSON.stringify(deleteServerFile(config, payload.path));
+  throw new Error('Unsupported file action.');
+}
+
 // ---------- RCON actions ----------
+let instanceManager = null;
+
 async function executeCommand(config, action, payload = {}) {
-  const rc = rcon.make(config.rcon, { allowPrivate: true });
+  const actionName = String(action || '');
+  if (actionName.startsWith('instance')) {
+    if (!instanceManager) throw new Error('The managed-instance engine is not ready.');
+    return instanceManager.execute(actionName, payload);
+  }
+  if (actionName.startsWith('files-')) return executeFileCommand(config, actionName, payload);
+  let rconConfig = config.rcon;
+  if (payload && payload.instanceId) {
+    if (!instanceManager) throw new Error('The managed-instance engine is not ready.');
+    rconConfig = instanceManager.rconTarget(String(payload.instanceId));
+  }
+  const rc = rcon.make(rconConfig, { allowPrivate: true });
   if (action === 'status') return rc.status();
   if (action === 'players') return rc.players();
   if (action === 'maps') return rc.maps();
@@ -706,6 +1094,46 @@ async function main() {
     throw new Error(`No agent configuration was found at ${configPath}. Run setup first.`);
   }
 
+  if (setFilesDirRequested || setInstancesDirRequested || setReclaimerExeRequested || setServerRootRequested) {
+    if (!hasConfig) throw new Error(`No agent configuration was found at ${configPath}. Run setup first.`);
+    const config = loadConfig();
+    if (setFilesDirRequested) {
+      const folder = argValue('--set-files-dir');
+      if (!folder) throw new Error('Pass --set-files-dir with the server content folder.');
+      config.filesRoot = normalizeFilesRoot(folder);
+      console.log(`Server files folder: ${config.filesRoot}`);
+    }
+    if (setInstancesDirRequested) {
+      const folder = argValue('--set-instances-dir');
+      if (!folder) throw new Error('Pass --set-instances-dir with the managed-instances folder.');
+      config.instancesRoot = normalizeInstancesRoot(folder, true);
+      console.log(`Managed instances folder: ${config.instancesRoot}`);
+    }
+    if (setReclaimerExeRequested) {
+      const exe = argValue('--set-reclaimer-exe');
+      if (!exe) throw new Error('Pass --set-reclaimer-exe with the Project Reclaimer executable.');
+      config.reclaimerExe = normalizeReclaimerExe(exe);
+      console.log(`Project Reclaimer executable: ${config.reclaimerExe}`);
+    }
+    if (setServerRootRequested) {
+      const folder = argValue('--set-server-root', '--set-mcc-path');
+      if (!folder) throw new Error('Pass --set-server-root with the Reclaimer server folder.');
+      if (!config.reclaimerExe) throw new Error('Set --set-reclaimer-exe before --set-server-root.');
+      config.serverRoot = normalizeServerRoot(folder, config.reclaimerExe);
+      delete config.mccPath;
+      console.log(`Reclaimer server folder: ${config.serverRoot}`);
+    }
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2), { encoding: 'utf8', mode: 0o600 });
+    restrictConfigPermissions(configPath);
+    if (config.instancesRoot && config.reclaimerExe) {
+      console.log('Managed server instances enabled. Restart OmniVaultAgent.exe to apply it.');
+    } else if (config.instancesRoot || config.reclaimerExe) {
+      console.log('Managed instances are not enabled yet: set both the instances folder and the Reclaimer executable.');
+    }
+    if (setFilesDirRequested) console.log('File manager setting saved. Restart OmniVaultAgent.exe to apply it.');
+    return;
+  }
+
   pruneExeUpdateFiles();
   let config;
   if (forceSetup || setupRequested || !hasConfig) {
@@ -713,6 +1141,7 @@ async function main() {
   } else {
     config = loadConfig();
   }
+  instanceManager = instances.createManager({ config });
 
   if (testOnly) {
     try {
@@ -722,6 +1151,8 @@ async function main() {
       console.log(`Server: ${config.serverId}`);
       console.log(`Panel: ${config.panelUrl}`);
       console.log(`Agent: ${VERSION}`);
+      const instanceState = instanceManager.configuration();
+      console.log(`Managed instances: ${instanceState.configured ? 'enabled' : instanceState.reason}`);
     } catch (error) {
       console.error(`RCON test failed: ${error.message}`);
       process.exitCode = 1;
@@ -775,6 +1206,8 @@ async function main() {
         type: 'hello',
         agentName: config.agentName || os.hostname(),
         agentVersion: VERSION,
+        filesEnabled: !!config.filesRoot,
+        instancesEnabled: instanceManager.configuration().configured,
       });
       setTimeout(() => maybeUpdate(config, 'connect'), 1500);
     });

@@ -1,6 +1,6 @@
 {
   "name": "omnivault-rcon-agent",
-  "version": "1.2.3",
+  "version": "1.4.2",
   "private": true,
   "description": "Outbound connector that lets the OmniVault panel control a local Reclaimer server without port forwarding.",
   "main": "agent.js",

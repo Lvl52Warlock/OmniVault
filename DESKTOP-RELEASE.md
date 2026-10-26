@@ -2,7 +2,7 @@
 
 The desktop app is built with Electron Builder. The Windows build produces one file:
 
-- `OmniVault-Setup-1.2.3.exe` — installer with Start Menu and desktop shortcuts.
+- `OmniVault-Setup-1.2.4.exe` — installer with Start Menu and desktop shortcuts.
 
 The public panel serves the current installer at `/api/desktop/download` when this file exists:
 
@@ -23,10 +23,16 @@ The artifact is written to `dist/`. Copy it to `desktop-dist/` to make the websi
 
 ```powershell
 New-Item -ItemType Directory -Force .\desktop-dist | Out-Null
-Copy-Item .\dist\OmniVault-Setup-1.2.3.exe .\desktop-dist\OmniVault-Setup.exe -Force
+Copy-Item .\dist\OmniVault-Setup-1.2.4.exe .\desktop-dist\OmniVault-Setup.exe -Force
 ```
 
 `desktop-dist/` is ignored by Git. The installer is not code-signed, so Windows SmartScreen may show an "Unknown publisher" warning until a code-signing certificate is configured.
+
+## Desktop updates
+
+The installed app has a **Check for updates** button in the panel header. It asks GitHub for the latest `OmniVault-Setup-*.exe` asset, compares versions, downloads the installer, verifies its size and SHA-256 digest, then runs the installer silently and reopens the app. The button is only shown inside the desktop shell, never in a browser tab.
+
+The update source is the latest published GitHub release. A build must be published as a release before installed copies can find it.
 
 ## Publish on GitHub
 
@@ -35,8 +41,8 @@ The repository is https://github.com/Lvl52Warlock/OmniVault.
 The workflow in `.github/workflows/build-desktop.yml` runs on every tag beginning with `v`, builds the Windows installer and the agent executable, and attaches both to a GitHub Release.
 
 ```powershell
-git tag v1.2.3
-git push origin v1.2.3
+git tag v1.2.4
+git push origin v1.2.4
 ```
 
 To build manually from GitHub, open **Actions → Build Windows desktop app and agent → Run workflow**. Both executables are available from the workflow run.
@@ -68,3 +74,15 @@ This creates `agent-dist\OmniVaultAgent.exe` (about 56 MB) and `OmniVaultAgent.s
 The exe checks for signed updates and replaces itself in place. Keep it in a folder the agent account can write to. `agent-config.json` sits next to the exe and is preserved across updates.
 
 Agent mode is the same whether the operator uses the browser or the desktop app; the transport and permissions do not change.
+
+## Server teams, files, and managed instances
+
+Agent **1.4.2** adds the server files manager, custom roles, and panel-created Reclaimer instances. Pass the server content folder and managed-instance folders during setup:
+
+```powershell
+.\OmniVaultAgent.exe --panel "https://omnivaultcontrolpanel.dpdns.org" --pair "1A2B-3C4D" --rcon-port 49176 --files-dir "C:\ProjectReclaimer\Content" --instances-dir "C:\OmniVault\instances" --reclaimer-exe "C:\Halo Server\project-reclaimer-dedicated.exe" --server-root "C:\Halo Server"
+```
+
+The agent only accesses files below the chosen folders. An already-paired agent can enable or change them without a new code with `--set-files-dir`, `--set-instances-dir`, `--set-reclaimer-exe`, and `--set-server-root`, then restart the agent. The server root must contain Reclaimer's `game\` and `content\` folders. A playlist needs at least three games.
+
+Owners can create custom roles with checkbox permissions, invite Moderators/Developers, assign roles, and remove access from **Manage access**. Only the owner can delete files or managed instances. The desktop app does not need to be rebuilt for these panel-side features; it loads the same public panel.

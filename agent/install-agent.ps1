@@ -5,6 +5,7 @@ param(
   [Parameter(Mandatory = $true)][int]$RconPort,
   [string]$RconPassword,
   [string]$AgentName = $env:COMPUTERNAME,
+  [string]$FilesDir,
   [switch]$SkipRconTest
 )
 
@@ -64,6 +65,15 @@ if (-not $RconPassword) {
 }
 if (-not $RconPassword) { throw "The RCON password cannot be empty." }
 
+$filesRoot = ""
+if ($FilesDir) {
+  $resolvedFiles = Resolve-Path -LiteralPath $FilesDir -ErrorAction Stop
+  if (-not (Test-Path -LiteralPath $resolvedFiles.Path -PathType Container)) {
+    throw "FilesDir must be a folder, for example the server's Content directory."
+  }
+  $filesRoot = $resolvedFiles.Path
+}
+
 $origin = Get-PanelOrigin $PanelUrl
 $normalizedCode = ($PairingCode.ToUpper() -replace "[^A-F0-9]", "")
 if ($normalizedCode.Length -ne 8) {
@@ -121,6 +131,7 @@ $config = @{
   agentName = $AgentName
   rcon = @{ host = $RconHost; port = [int]$RconPort; password = $RconPassword }
 }
+if ($filesRoot) { $config.filesRoot = $filesRoot }
 $configPath = Join-Path $scriptDir "agent-config.json"
 $config | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $configPath -Encoding utf8
 
