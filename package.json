@@ -12,7 +12,7 @@
     "public": "powershell -NoProfile -ExecutionPolicy Bypass -File ../start-public.ps1",
     "stop-public": "powershell -NoProfile -ExecutionPolicy Bypass -File ../stop-public.ps1",
     "build:agent": "node scripts/build-agent.js",
-    "dist:win": "electron-builder --win nsis",
+    "dist:win": "electron-builder --win nsis --publish never",
     "dist:dir": "electron-builder --dir"
   },
   "dependencies": {

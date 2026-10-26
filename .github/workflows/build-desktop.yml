@@ -27,7 +27,7 @@ jobs:
         run: npm ci
 
       - name: Install agent dependencies
-        run: npm install --prefix agent --no-audit --no-fund
+        run: npm ci --prefix agent
 
       - name: Build Windows installer
         run: npm run dist:win
