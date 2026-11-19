@@ -10,10 +10,10 @@ The recommended connection method is the **OmniVault agent**: a single Windows `
 | --- | --- |
 | Web control panel | https://omnivaultcontrolpanel.dpdns.org |
 | Windows desktop app | https://omnivaultcontrolpanel.dpdns.org/api/desktop/download |
-| Agent for the game-server PC | https://omnivaultcontrolpanel.dpdns.org/api/agent/download |
+| Agent for the game-server PC | https://github.com/Lvl52Warlock/OmniVault/releases/latest/download/OmniVaultAgent.exe |
 | GitHub source and releases | https://github.com/Lvl52Warlock/OmniVault |
 
-The same releases are served by the panel at `/api/desktop/download` and `/api/agent/download`.
+The same releases are served by the panel at `/api/desktop/download` and `/api/agent/download`. If an older installed desktop build says the agent is not published, use the GitHub agent link above; the current installer bundles the agent and falls back to GitHub if its local copy is missing.
 
 The desktop app checks the latest GitHub release from its **Check for updates** control in the top bar. It verifies the installer size and SHA-256 digest before running the signed-in-place Windows installer, then reopens the app.
 

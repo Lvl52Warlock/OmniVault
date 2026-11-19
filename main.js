@@ -4,6 +4,7 @@ const electronModule = require('electron');
 const electronApp = (typeof electronModule === 'object' && electronModule !== null && electronModule.app) ? electronModule.app : null;
 const BrowserWindow = (typeof electronModule === 'object' && electronModule !== null && typeof electronModule.BrowserWindow === 'function') ? electronModule.BrowserWindow : null;
 const electronDialog = (typeof electronModule === 'object' && electronModule !== null && electronModule.dialog) ? electronModule.dialog : null;
+const electronShell = (typeof electronModule === 'object' && electronModule !== null && electronModule.shell) ? electronModule.shell : null;
 const ipcMain = (typeof electronModule === 'object' && electronModule !== null && electronModule.ipcMain) ? electronModule.ipcMain : null;
 const express = require('express');
 const path = require('path');
@@ -92,7 +93,52 @@ const AUDIT_FILE = path.join(DATA_DIR, 'audit.log');
 const AGENT_DIR = path.join(__dirname, 'agent');
 const AGENT_UPDATE_KEY_FILE = path.join(__dirname, '..', 'agent-update-private.pem');
 const AGENT_EXE_FILE = path.join(__dirname, 'agent-dist', 'OmniVaultAgent.exe');
+const AGENT_EXE_RESOURCE_FILE = process.resourcesPath
+  ? path.join(process.resourcesPath, 'agent-dist', 'OmniVaultAgent.exe')
+  : '';
+const AGENT_GITHUB_DOWNLOAD_URL = 'https://github.com/Lvl52Warlock/OmniVault/releases/latest/download/OmniVaultAgent.exe';
 const DESKTOP_INSTALLER_FILE = path.join(__dirname, 'desktop-dist', 'OmniVault-Setup.exe');
+function resolveAgentExe() {
+  for (const candidate of [AGENT_EXE_FILE, AGENT_EXE_RESOURCE_FILE]) {
+    if (candidate && fs.existsSync(candidate)) return candidate;
+  }
+  return '';
+}
+
+function isAgentDownloadRequest(target) {
+  try {
+    return new URL(target).pathname === '/api/agent/download';
+  } catch {
+    return false;
+  }
+}
+
+// A panel older than this app answers /api/agent/download with a 404 page, so
+// the desktop shell navigates to that error instead of downloading. Save the
+// copy bundled with this build instead, and fall back to the release asset
+// when a development run has no packaged copy.
+async function deliverAgentDownload() {
+  const agentExe = resolveAgentExe();
+  if (!agentExe) {
+    if (electronShell) electronShell.openExternal(AGENT_GITHUB_DOWNLOAD_URL);
+    return;
+  }
+  try {
+    const options = {
+      title: 'Save OmniVaultAgent.exe',
+      defaultPath: 'OmniVaultAgent.exe',
+      filters: [{ name: 'Windows executable', extensions: ['exe'] }],
+    };
+    const result = mainWindow
+      ? await electronDialog.showSaveDialog(mainWindow, options)
+      : await electronDialog.showSaveDialog(options);
+    if (result.canceled || !result.filePath) return;
+    await fs.promises.copyFile(agentExe, result.filePath);
+  } catch (error) {
+    console.error('Could not save the bundled agent:', error.message);
+    if (electronShell) electronShell.openExternal(AGENT_GITHUB_DOWNLOAD_URL);
+  }
+}
 const AGENT_UPDATE_PACKAGE_FILES = [
   'agent.js', 'rcon.js', 'instances.js', 'package.json', 'update-public.pem',
   'start-agent.ps1', 'start-agent.cmd', 'README.txt',
@@ -184,11 +230,13 @@ function buildAgentUpdatePackage() {
   return { version, publishedAt, files, signature };
 }
 function buildAgentExeManifest() {
+  const agentExe = resolveAgentExe();
+  if (!agentExe) return null;
   let key;
   let data;
   try {
     key = fs.readFileSync(AGENT_UPDATE_KEY_FILE, 'utf8');
-    data = fs.readFileSync(AGENT_EXE_FILE);
+    data = fs.readFileSync(agentExe);
   } catch {
     return null;
   }
@@ -1060,6 +1108,11 @@ function createWindow(url) {
   try { allowedOrigin = new URL(panelUrl).origin; } catch {}
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   mainWindow.webContents.on('will-navigate', (event, target) => {
+    if (isAgentDownloadRequest(target)) {
+      event.preventDefault();
+      deliverAgentDownload();
+      return;
+    }
     try {
       if (!allowedOrigin || new URL(target).origin !== allowedOrigin) event.preventDefault();
     } catch {
@@ -1137,10 +1190,14 @@ function startServer() {
     if (!checkRate(`agent-download:${clientIp(req)}`, 60, 10 * 60 * 1000)) {
       return res.status(429).send('Too many downloads. Try again later.');
     }
-    if (!fs.existsSync(AGENT_EXE_FILE)) {
-      return res.status(404).send('The agent executable is not published yet.');
+    const agentExe = resolveAgentExe();
+    if (!agentExe) {
+      // Older installers did not bundle the agent. Keep their Download agent
+      // button useful by sending them to the official release asset.
+      res.setHeader('Cache-Control', 'no-store');
+      return res.redirect(302, AGENT_GITHUB_DOWNLOAD_URL);
     }
-    res.download(AGENT_EXE_FILE, 'OmniVaultAgent.exe');
+    res.download(agentExe, 'OmniVaultAgent.exe');
   });
 
   // Signed agent executable manifest. The signature uses the Ed25519 private
@@ -1165,15 +1222,16 @@ function startServer() {
     if (!checkRate(`agent-update-exe-download:${clientIp(req)}`, 60, 10 * 60 * 1000)) {
       return res.status(429).send('Too many agent downloads. Try again later.');
     }
-    if (!fs.existsSync(AGENT_EXE_FILE)) {
+    const agentExe = resolveAgentExe();
+    if (!agentExe) {
       return res.status(404).send('The agent executable is not published yet.');
     }
-    const stat = fs.statSync(AGENT_EXE_FILE);
+    const stat = fs.statSync(agentExe);
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Length', stat.size);
     res.setHeader('Content-Disposition', 'attachment; filename="OmniVaultAgent.exe"');
-    fs.createReadStream(AGENT_EXE_FILE).pipe(res);
+    fs.createReadStream(agentExe).pipe(res);
   });
 
   // Legacy signed source-file package. Existing 1.1.x ZIP agents still use

@@ -10,12 +10,14 @@ The public panel serves the current installer at `/api/desktop/download` when th
 desktop-dist/OmniVault-Setup.exe
 ```
 
-There is intentionally no separate portable download. The panel offers one desktop `.exe` and a single-file agent `.exe`; the agent is not installed by the desktop app.
+There is intentionally no separate portable download. The panel offers one desktop `.exe` and a single-file agent `.exe`; the desktop installer carries a copy of the agent for its **Download agent** button, but the agent still runs separately on the game-server PC.
 
 ## Build locally
 
 ```powershell
 npm install
+npm install --prefix agent
+npm run build:agent
 npm run dist:win
 ```
 
@@ -38,7 +40,7 @@ The update source is the latest published GitHub release. A build must be publis
 
 The repository is https://github.com/Lvl52Warlock/OmniVault.
 
-The workflow in `.github/workflows/build-desktop.yml` runs on every tag beginning with `v`, builds the Windows installer and the agent executable, and attaches both to a GitHub Release.
+The workflow in `.github/workflows/build-desktop.yml` runs on every tag beginning with `v`, builds the agent executable first, then the Windows installer, and attaches both to a GitHub Release. The agent is also bundled into the installer as an extra resource so the app's **Download agent** button works.
 
 ```powershell
 git tag v1.2.4
@@ -69,7 +71,7 @@ npm install --prefix agent
 npm run build:agent
 ```
 
-This creates `agent-dist\OmniVaultAgent.exe` (about 56 MB) and `OmniVaultAgent.sha256`. The panel serves the executable at `/api/agent/download`; build it on the panel machine or copy the built file there. The exe contains the Node runtime and its dependency, so game-server owners do not need Node.js or a ZIP.
+This creates `agent-dist\OmniVaultAgent.exe` (about 56 MB) and `OmniVaultAgent.sha256`. Build it before `npm run dist:win` so the desktop installer includes a copy as an extra resource; the panel also serves the executable at `/api/agent/download`. The exe contains the Node runtime and its dependency, so game-server owners do not need Node.js or a ZIP.
 
 The exe checks for signed updates and replaces itself in place. Keep it in a folder the agent account can write to. `agent-config.json` sits next to the exe and is preserved across updates.
 

@@ -1,6 +1,6 @@
 {
   "name": "omnivault-rcon-client",
-  "version": "1.2.4",
+  "version": "1.2.5",
   "description": "OmniVault desktop control room for Project Reclaimer servers.",
   "main": "main.js",
   "author": "OmniVault",
@@ -64,6 +64,16 @@
       "!panel-runtime.json",
       "!dist/**/*",
       "!desktop-dist/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "agent-dist",
+        "to": "agent-dist",
+        "filter": [
+          "OmniVaultAgent.exe",
+          "OmniVaultAgent.sha256"
+        ]
+      }
     ],
     "win": {
       "target": [
